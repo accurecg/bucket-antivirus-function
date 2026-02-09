@@ -186,7 +186,8 @@ def scan_output_to_json(output):
 
 def scan_file(path):
     av_env = os.environ.copy()
-    av_env["LD_LIBRARY_PATH"] = CLAMAVLIB_PATH
+    if CLAMAVLIB_PATH:
+        av_env["LD_LIBRARY_PATH"] = CLAMAVLIB_PATH
     print("Starting clamscan of %s." % path)
     av_proc = subprocess.Popen(
         [CLAMSCAN_PATH, "-v", "-a", "--stdout", "-d", AV_DEFINITION_PATH, path],

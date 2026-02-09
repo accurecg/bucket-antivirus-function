@@ -1,0 +1,31 @@
+# ECS queue worker: official ClamAV image + Python worker that long-polls SQS.
+# Override the default clamd/freshclam entrypoint and run the scan worker instead.
+# Requires: AV_SCAN_QUEUE_URL, AV_DEFINITION_S3_BUCKET, and same env as scan Lambda.
+# Recommend 3-4 GiB RAM per task (see ClamAV docs).
+
+FROM clamav/clamav:stable
+
+USER root
+
+# Install Python for the worker (official image is Alpine)
+RUN apk add --no-cache python3 py3-pip
+
+WORKDIR /app
+
+# Worker dependencies (includes boto3; Lambda runtime provides it separately)
+COPY requirements-worker.txt requirements-worker.txt
+RUN pip3 install --no-cache-dir -r requirements-worker.txt
+
+# App code used by the worker
+COPY common.py clamav.py metrics.py scan.py worker.py ./
+
+# ClamAV paths in the official image
+ENV CLAMSCAN_PATH=/usr/bin/clamscan \
+    AV_DEFINITION_PATH=/var/lib/clamav \
+    CLAMAVLIB_PATH=""
+
+# Optional: ensure defs dir is writable so worker can pull from S3
+RUN chmod 777 /var/lib/clamav 2>/dev/null || true
+
+# Run the queue worker (infinite loop)
+ENTRYPOINT ["python3", "worker.py"]

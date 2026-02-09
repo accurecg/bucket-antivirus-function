@@ -276,6 +276,24 @@ the table below for reference.
 | AV_PROCESS_ORIGINAL_VERSION_ONLY | Controls that only original version of an S3 key is processed (if bucket versioning is enabled) | False | No |
 | AV_DELETE_INFECTED_FILES | Controls whether infected files should be automatically deleted | False | No |
 | EVENT_SOURCE | The source of antivirus scan event "S3" or "SNS" (optional) | S3 | No |
+| AV_SCAN_QUEUE_URL | SQS queue URL for the Dockerised worker (enqueue Lambda and ECS worker) | | No |
+| AV_EXPECTED_BUCKET_KEY | If set, only object keys containing this string are scanned (e.g. `ecgfile`) | | No |
+
+## Dockerised ECS queue worker
+
+You can run the scanner as a long-running ECS service that long-polls an SQS queue instead of using the scan Lambda. This uses the official ClamAV Docker image and scales by queue depth.
+
+1. **SQS queue**: Create a standard SQS queue for scan jobs.
+2. **Enqueue Lambda**: Deploy `enqueue.py` as a Lambda triggered by S3 object create (or SNS from S3). Set `AV_SCAN_QUEUE_URL` and `AV_EXPECTED_BUCKET_KEY` (e.g. `ecgfile`). The Lambda only enqueues messages when the object key contains that string (e.g. `uuid/ecgfile/another-uuid.json`).
+3. **Worker image**: Build the worker image with the official ClamAV image as base:
+
+   ```sh
+   docker build -f Dockerfile.worker -t bucket-antivirus-worker .
+   ```
+
+4. **ECS**: Run the image as an ECS Service with the same environment variables as the scan Lambda (e.g. `AV_DEFINITION_S3_BUCKET`, `AV_DEFINITION_S3_PREFIX`, `AV_STATUS_SNS_ARN`, `AV_SCAN_QUEUE_URL`). Set `CLAMSCAN_PATH=/usr/bin/clamscan` and `AV_DEFINITION_PATH=/var/lib/clamav` (defaults in the Dockerfile). Allocate at least 3–4 GiB RAM per task. Use Application Auto Scaling to scale task count by SQS `ApproximateNumberOfMessagesVisible`.
+
+The worker runs an infinite loop: long-poll SQS (e.g. 20s), process one message (download S3 object, update defs from S3 if needed, run clamscan, set tags/metadata, SNS, metrics), delete the message, repeat.
 
 ## S3 Bucket Policy Examples
 

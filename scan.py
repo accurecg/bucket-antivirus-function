@@ -192,7 +192,10 @@ def sns_scan_results(
         Message=json.dumps({"default": json.dumps(message)}),
         MessageStructure="json",
         MessageAttributes={
-            AV_SCAN_BUCKET: {"DataType": "String", "StringValue": s3_object.bucket_name},
+            AV_SCAN_BUCKET: {
+                "DataType": "String",
+                "StringValue": s3_object.bucket_name,
+            },
             AV_STATUS_METADATA: {"DataType": "String", "StringValue": scan_result},
             AV_SIGNATURE_METADATA: {
                 "DataType": "String",
@@ -200,29 +203,30 @@ def sns_scan_results(
             },
             AV_EXPECTED_BUCKET_KEY_STATUS: {
                 "DataType": "String",
-                "StringValue": "PRESENT" if AV_EXPECTED_BUCKET_KEY in s3_object.key else "NOT_PRESENT"
+                "StringValue": "PRESENT"
+                if AV_EXPECTED_BUCKET_KEY in s3_object.key
+                else "NOT_PRESENT",
             },
         },
     )
 
 
-def lambda_handler(event, context):
+def scan_one_object(s3_object):
+    """
+    Download the S3 object, scan with ClamAV, set tags/metadata, publish SNS, send metrics.
+    Used by both the Lambda handler and the ECS queue worker.
+    """
     s3 = boto3.resource("s3")
     s3_client = boto3.client("s3")
     sns_client = boto3.client("sns")
-
-    # Get some environment variables
     ENV = os.getenv("ENV", "")
-    EVENT_SOURCE = os.getenv("EVENT_SOURCE", "S3")
 
     start_time = get_timestamp()
     print("Script starting at %s\n" % (start_time))
-    s3_object = event_object(event, event_source=EVENT_SOURCE)
 
     if str_to_bool(AV_PROCESS_ORIGINAL_VERSION_ONLY):
         verify_s3_object_version(s3, s3_object)
 
-    # Publish the start time of the scan
     if AV_SCAN_START_SNS_ARN not in [None, ""]:
         start_scan_time = get_timestamp()
         sns_start_scan(sns_client, s3_object, AV_SCAN_START_SNS_ARN, start_scan_time)
@@ -248,12 +252,10 @@ def lambda_handler(event, context):
     )
 
     result_time = get_timestamp()
-    # Set the properties on the object with the scan results
     if "AV_UPDATE_METADATA" in os.environ:
         set_av_metadata(s3_object, scan_result, scan_signature, result_time)
     set_av_tags(s3_client, s3_object, scan_result, scan_signature, result_time)
 
-    # Publish the scan results
     if AV_STATUS_SNS_ARN not in [None, ""]:
         sns_scan_results(
             sns_client,
@@ -267,7 +269,6 @@ def lambda_handler(event, context):
     metrics.send(
         env=ENV, bucket=s3_object.bucket_name, key=s3_object.key, status=scan_result
     )
-    # Delete downloaded file to free up room on re-usable lambda function container
     try:
         os.remove(file_path)
     except OSError:
@@ -276,6 +277,15 @@ def lambda_handler(event, context):
         delete_s3_object(s3_object)
     stop_scan_time = get_timestamp()
     print("Script finished at %s\n" % stop_scan_time)
+
+
+def lambda_handler(event, context):
+    EVENT_SOURCE = os.getenv("EVENT_SOURCE", "S3")
+    s3_object = event_object(event, event_source=EVENT_SOURCE)
+    if AV_EXPECTED_BUCKET_KEY and AV_EXPECTED_BUCKET_KEY not in s3_object.key:
+        print("Skipping scan for non ecg file - %s" % (s3_object.key))
+        return
+    scan_one_object(s3_object)
 
 
 def str_to_bool(s):
