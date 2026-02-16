@@ -1,0 +1,10 @@
+{
+  "comment": "Add this 'healthCheck' block to the container definition in your ECS Fargate task definition. Ensures the task is only marked HEALTHY when both clamd and the Python worker are running. startPeriod allows ~17s for ClamAV to load signatures before failed checks count against the task.",
+  "healthCheck": {
+    "command": ["CMD-SHELL", "/healthcheck.sh"],
+    "interval": 30,
+    "timeout": 5,
+    "retries": 3,
+    "startPeriod": 60
+  }
+}

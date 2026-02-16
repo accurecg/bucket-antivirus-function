@@ -308,7 +308,7 @@ You can run the scanner as a long-running ECS service that long-polls an SQS que
 
 4. **ECS**: Run the image as an ECS Service with the same environment variables as the scan Lambda (e.g. `AV_DEFINITION_S3_BUCKET`, `AV_DEFINITION_S3_PREFIX`, `AV_STATUS_SNS_ARN`, `AV_SCAN_QUEUE_URL`). The worker image starts **clamd** in the background and uses **clamdscan** to scan files (definitions stay in memory; faster than clamscan per file). Defaults in the Dockerfile: `CLAMDSCAN_PATH=/usr/bin/clamdscan`, `CLAMD_SOCKET=/tmp/clamd.sock`, `AV_DEFINITION_PATH=/var/lib/clamav`. Allocate at least 3–4 GiB RAM per task. Use Application Auto Scaling to scale task count by SQS `ApproximateNumberOfMessagesVisible`.
 
-The container entrypoint starts clamd, waits for its socket, then runs the Python worker. The worker long-polls SQS (e.g. 20s), processes one message (download S3 object, update defs from S3 if needed, reload clamd, run clamdscan, set tags/metadata, SNS, metrics), deletes the message, and repeats.
+The container entrypoint starts clamd (with `clamd.conf` tuned for memory and SelfCheck), waits for its socket, then runs the Python worker. The worker long-polls SQS (e.g. 20s), processes one message (download S3 object, run clamdscan, set tags/metadata, SNS, metrics), deletes the message, and repeats. Virus definition updates run in a background thread every 60 minutes; clamd's SelfCheck (every 10 min) auto-reloads when new .cvd files appear on disk, so the per-scan path stays fast (&lt;300ms).
 
 ### Health check (dual liveness: clamd + worker)
 

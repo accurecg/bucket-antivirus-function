@@ -21,8 +21,9 @@ WORKDIR /app
 COPY requirements-worker.txt requirements-worker.txt
 RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -r requirements-worker.txt
 
-# App code, entrypoint (start clamd then worker), and health check
+# App code, clamd config, entrypoint (start clamd then worker), and health check
 COPY common.py clamav.py metrics.py scan.py worker.py ./
+COPY clamd.conf.worker /app/clamd.conf
 COPY scripts/entrypoint-worker.sh /app/entrypoint-worker.sh
 COPY scripts/healthcheck.sh /healthcheck.sh
 RUN chmod +x /app/entrypoint-worker.sh /healthcheck.sh
