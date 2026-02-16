@@ -33,6 +33,7 @@ from common import AV_SIGNATURE_UNKNOWN
 from common import AV_STATUS_CLEAN
 from common import AV_STATUS_INFECTED
 from common import CLAMAVLIB_PATH
+from common import CLAMDSCAN_PATH
 from common import CLAMSCAN_PATH
 from common import FRESHCLAM_PATH
 from common import create_dir
@@ -42,7 +43,17 @@ RE_SEARCH_DIR = r"SEARCH_DIR\(\"=([A-z0-9\/\-_]*)\"\)"
 
 
 def current_library_search_path():
-    ld_verbose = subprocess.check_output(["ld", "--verbose"]).decode("utf-8")
+    """
+    Return the system linker search paths parsed from `ld --verbose`.
+
+    In environments like AWS Lambda where `ld` is not available, this
+    returns an empty list instead of raising, so callers can fall back
+    to using only CLAMAVLIB_PATH.
+    """
+    try:
+        ld_verbose = subprocess.check_output(["ld", "--verbose"]).decode("utf-8")
+    except (FileNotFoundError, OSError, subprocess.CalledProcessError):
+        return []
     rd_ld = re.compile(RE_SEARCH_DIR)
     return rd_ld.findall(ld_verbose)
 
@@ -111,10 +122,13 @@ def update_defs_from_freshclam(path, library_path=""):
     create_dir(path)
     fc_env = os.environ.copy()
     if library_path:
-        fc_env["LD_LIBRARY_PATH"] = "%s:%s" % (
-            ":".join(current_library_search_path()),
-            CLAMAVLIB_PATH,
-        )
+        search_paths = current_library_search_path()
+        if search_paths:
+            fc_env["LD_LIBRARY_PATH"] = ":".join(search_paths + [CLAMAVLIB_PATH])
+        else:
+            # Fallback for environments without `ld` (e.g. AWS Lambda):
+            # just point at the bundled ClamAV libs.
+            fc_env["LD_LIBRARY_PATH"] = CLAMAVLIB_PATH
     print("Starting freshclam with defs in %s." % path)
     fc_proc = subprocess.Popen(
         [
@@ -184,7 +198,47 @@ def scan_output_to_json(output):
     return summary
 
 
+def _scan_file_clamdscan(path):
+    """Scan using clamdscan (connects to clamd daemon). Faster when defs are in memory."""
+    print("Starting clamdscan of %s." % path)
+    av_proc = subprocess.Popen(
+        [CLAMDSCAN_PATH, "--stdout", path],
+        stderr=subprocess.STDOUT,
+        stdout=subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    output = av_proc.communicate()[0].decode()
+    print("clamdscan output:\n%s" % output)
+    summary = scan_output_to_json(output)
+    # clamdscan reports "path: OK" or "path: SignatureName FOUND"
+    value = summary.get(path, "")
+    if av_proc.returncode == 0:
+        return AV_STATUS_CLEAN, AV_SIGNATURE_OK
+    elif av_proc.returncode == 1:
+        signature = value.replace(" FOUND", "") if value else AV_SIGNATURE_UNKNOWN
+        return AV_STATUS_INFECTED, signature
+    else:
+        msg = "Unexpected exit code from clamdscan: %s.\n" % av_proc.returncode
+        print(msg)
+        raise Exception(msg)
+
+
+def reload_daemon():
+    """Tell clamd to reload virus definitions (e.g. after pulling from S3)."""
+    if not CLAMDSCAN_PATH or not os.path.isfile(CLAMDSCAN_PATH):
+        return
+    print("Reloading clamd virus definitions.", flush=True)
+    subprocess.run(
+        [CLAMDSCAN_PATH, "--reload"],
+        capture_output=True,
+        timeout=60,
+    )
+
+
 def scan_file(path):
+    if CLAMDSCAN_PATH and os.path.isfile(CLAMDSCAN_PATH):
+        return _scan_file_clamdscan(path)
+
     av_env = os.environ.copy()
     if CLAMAVLIB_PATH:
         av_env["LD_LIBRARY_PATH"] = CLAMAVLIB_PATH

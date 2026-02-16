@@ -1,5 +1,5 @@
 # ECS queue worker: official ClamAV image + Python worker that long-polls SQS.
-# Override the default clamd/freshclam entrypoint and run the scan worker instead.
+# Runs clamd (background) + worker (foreground) with tini as PID 1 for zombie reaping and signals.
 # Requires: AV_SCAN_QUEUE_URL, AV_DEFINITION_S3_BUCKET, and same env as scan Lambda.
 # Recommend 3-4 GiB RAM per task (see ClamAV docs).
 
@@ -7,25 +7,42 @@ FROM clamav/clamav:stable
 
 USER root
 
-# Install Python for the worker (official image is Alpine)
+# Install Python for the worker
 RUN apk add --no-cache python3 py3-pip
+
+# tini as PID 1 (reaps zombies, forwards SIGTERM). Use static binary so we don't depend on base image repos.
+# For ARM64 Fargate tasks, switch to tini-static-arm64 or install tini via apk in a separate RUN.
+ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-static-amd64 /usr/bin/tini
+RUN chmod +x /usr/bin/tini
 
 WORKDIR /app
 
 # Worker dependencies (includes boto3; Lambda runtime provides it separately)
 COPY requirements-worker.txt requirements-worker.txt
-RUN pip3 install --no-cache-dir -r requirements-worker.txt
+RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -r requirements-worker.txt
 
-# App code used by the worker
+# App code, entrypoint (start clamd then worker), and health check
 COPY common.py clamav.py metrics.py scan.py worker.py ./
+COPY scripts/entrypoint-worker.sh /app/entrypoint-worker.sh
+COPY scripts/healthcheck.sh /healthcheck.sh
+RUN chmod +x /app/entrypoint-worker.sh /healthcheck.sh
 
-# ClamAV paths in the official image
+# Unbuffer Python so logs appear in ECS/CloudWatch in real time
+ENV PYTHONUNBUFFERED=1
+
+# ClamAV: use clamd (daemon) + clamdscan in the worker; socket default matches clamd.conf
 ENV CLAMSCAN_PATH=/usr/bin/clamscan \
+    CLAMDSCAN_PATH=/usr/bin/clamdscan \
+    CLAMD_SOCKET=/tmp/clamd.sock \
     AV_DEFINITION_PATH=/var/lib/clamav \
     CLAMAVLIB_PATH=""
 
 # Optional: ensure defs dir is writable so worker can pull from S3
 RUN chmod 777 /var/lib/clamav 2>/dev/null || true
 
-# Run the queue worker (infinite loop)
-ENTRYPOINT ["python3", "worker.py"]
+# Docker health check (dual: clamd + worker). ECS task definition should override with startPeriod: 60.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["/healthcheck.sh"]
+
+# tini as PID 1: reaps zombies from clamd/subprocess, forwards SIGTERM; then start clamd + worker
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint-worker.sh"]

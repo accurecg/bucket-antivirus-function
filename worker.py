@@ -35,7 +35,10 @@ def run():
     sqs = boto3.client("sqs")
     s3 = boto3.resource("s3")
 
-    print("Worker starting at %s, queue %s" % (get_timestamp(), AV_SCAN_QUEUE_URL))
+    print(
+        "Worker starting at %s, queue %s" % (get_timestamp(), AV_SCAN_QUEUE_URL),
+        flush=True,
+    )
 
     while True:
         try:
@@ -46,7 +49,7 @@ def run():
                 VisibilityTimeout=900,
             )
         except Exception as e:
-            print("SQS receive_message error: %s" % e, file=sys.stderr)
+            print("SQS receive_message error: %s" % e, file=sys.stderr, flush=True)
             continue
 
         messages = resp.get("Messages") or []
@@ -58,7 +61,9 @@ def run():
                 key = body.get("key")
                 if not bucket or not key:
                     print(
-                        "Invalid message body (missing bucket/key), deleting: %s" % body
+                        "Invalid message body (missing bucket/key), deleting: %s"
+                        % body,
+                        flush=True,
                     )
                     sqs.delete_message(
                         QueueUrl=AV_SCAN_QUEUE_URL,
@@ -78,6 +83,7 @@ def run():
                     "Failed to process message (will retry after visibility timeout): %s"
                     % e,
                     file=sys.stderr,
+                    flush=True,
                 )
 
 

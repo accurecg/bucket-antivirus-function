@@ -16,8 +16,8 @@
 import copy
 import json
 import os
+import time
 from urllib.parse import unquote_plus
-from distutils.util import strtobool
 
 import boto3
 
@@ -114,7 +114,10 @@ def delete_s3_object(s3_object):
             % (s3_object.bucket_name, s3_object.key)
         )
     else:
-        print("Infected file deleted: %s.%s" % (s3_object.bucket_name, s3_object.key))
+        print(
+            "Infected file deleted: %s.%s" % (s3_object.bucket_name, s3_object.key),
+            flush=True,
+        )
 
 
 def set_av_metadata(s3_object, scan_result, scan_signature, timestamp):
@@ -222,7 +225,7 @@ def scan_one_object(s3_object):
     ENV = os.getenv("ENV", "")
 
     start_time = get_timestamp()
-    print("Script starting at %s\n" % (start_time))
+    print("Script starting at %s\n" % (start_time), flush=True)
 
     if str_to_bool(AV_PROCESS_ORIGINAL_VERSION_ONLY):
         verify_s3_object_version(s3, s3_object)
@@ -242,13 +245,22 @@ def scan_one_object(s3_object):
     for download in to_download.values():
         s3_path = download["s3_path"]
         local_path = download["local_path"]
-        print("Downloading definition file %s from s3://%s" % (local_path, s3_path))
+        print(
+            "Downloading definition file %s from s3://%s" % (local_path, s3_path),
+            flush=True,
+        )
         s3.Bucket(AV_DEFINITION_S3_BUCKET).download_file(s3_path, local_path)
-        print("Downloading definition file %s complete!" % (local_path))
+        print("Downloading definition file %s complete!" % (local_path), flush=True)
+
+    s3_uri = "s3://%s/%s" % (s3_object.bucket_name, s3_object.key)
+    print("Starting scan of %s (local path: %s)" % (s3_uri, file_path), flush=True)
+    scan_start = time.time()
     scan_result, scan_signature = clamav.scan_file(file_path)
+    scan_elapsed = time.time() - scan_start
     print(
-        "Scan of s3://%s resulted in %s\n"
-        % (os.path.join(s3_object.bucket_name, s3_object.key), scan_result)
+        "Scan completed for %s in %.2f s - result: %s\n"
+        % (s3_uri, scan_elapsed, scan_result),
+        flush=True,
     )
 
     result_time = get_timestamp()
@@ -276,17 +288,23 @@ def scan_one_object(s3_object):
     if str_to_bool(AV_DELETE_INFECTED_FILES) and scan_result == AV_STATUS_INFECTED:
         delete_s3_object(s3_object)
     stop_scan_time = get_timestamp()
-    print("Script finished at %s\n" % stop_scan_time)
+    print("Script finished at %s\n" % stop_scan_time, flush=True)
 
 
 def lambda_handler(event, context):
     EVENT_SOURCE = os.getenv("EVENT_SOURCE", "S3")
     s3_object = event_object(event, event_source=EVENT_SOURCE)
     if AV_EXPECTED_BUCKET_KEY and AV_EXPECTED_BUCKET_KEY not in s3_object.key:
-        print("Skipping scan for non ecg file - %s" % (s3_object.key))
+        print("Skipping scan for non ecg file - %s" % (s3_object.key), flush=True)
         return
     scan_one_object(s3_object)
 
 
 def str_to_bool(s):
-    return bool(strtobool(str(s)))
+    """Convert string to bool; compatible with distutils.util.strtobool (removed in Python 3.12)."""
+    v = str(s).lower()
+    if v in ("yes", "true", "1", "on"):
+        return True
+    if v in ("no", "false", "0", "off"):
+        return False
+    raise ValueError("Invalid truth value: %s" % s)
