@@ -221,11 +221,14 @@ def scan_one_object_from_path(
     s3_resource=None,
     s3_client=None,
     sns_client=None,
+    skip_post_processing=False,
 ):
     """
     Scan an already-downloaded file with ClamAV, set tags/metadata, publish SNS, send metrics.
     Used by the ECS worker prefetch pipeline; caller owns file_path and must os.remove it.
     Does not download; assumes file exists at file_path.
+    When skip_post_processing=True, only runs the scan and optional set_av_metadata; the caller
+    is responsible for S3 tagging, SNS publish, SQS delete (e.g. via worker.run_post_processing_tasks).
     Returns (scan_result, scan_signature).
     """
     s3 = s3_resource if s3_resource is not None else boto3.resource("s3")
@@ -254,6 +257,10 @@ def scan_one_object_from_path(
     result_time = get_timestamp()
     if "AV_UPDATE_METADATA" in os.environ:
         set_av_metadata(s3_object, scan_result, scan_signature, result_time)
+
+    if skip_post_processing:
+        return scan_result, scan_signature
+
     set_av_tags(s3_client, s3_object, scan_result, scan_signature, result_time)
 
     if AV_STATUS_SNS_ARN not in [None, ""]:
