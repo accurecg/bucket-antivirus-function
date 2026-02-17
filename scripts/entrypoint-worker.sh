@@ -16,13 +16,22 @@ else
   exit 1
 fi
 
-# Wait for the socket to appear and daemon to be ready
+# Wait for the socket to appear
 echo "Waiting for clamd socket at $CLAMD_SOCKET..."
 while [ ! -S "$CLAMD_SOCKET" ]; do
   sleep 1
 done
-# Give clamd a moment to finish loading databases
-sleep 2
-echo "clamd is ready."
+# ClamAV loads ~1.2 GiB of signatures into memory; can take 1-3 minutes. Poll until clamd responds.
+echo "Waiting for clamd to load databases and respond to ping..."
+CLAMD_CONF="${CLAMD_CONF:-/app/clamd.conf}"
+for i in $(seq 1 60); do
+  if clamdscan --config-file="$CLAMD_CONF" --ping 2>/dev/null; then
+    echo "clamd is ready (responded to ping)."
+    break
+  fi
+  [ "$i" -eq 60 ] && { echo "clamd failed to respond within 5 minutes" >&2; exit 1; }
+  echo "  Attempt $i/60: clamd still loading..."
+  sleep 5
+done
 
 exec /venv/bin/python worker.py

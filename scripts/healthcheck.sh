@@ -4,8 +4,9 @@
 
 LOG="/proc/1/fd/1"
 
-# 1. Ping the ClamAV daemon (uses default socket or CLAMD_SOCKET from clamd config)
-if ! clamdscan --ping 2>/dev/null; then
+# 1. Ping the ClamAV daemon (use our clamd.conf so we hit the correct socket)
+CLAMD_CONF="${CLAMD_CONF:-/app/clamd.conf}"
+if ! clamdscan --config-file="$CLAMD_CONF" --ping 2>/dev/null; then
   echo "[HealthCheck] ClamAV daemon is not responding." >"$LOG" 2>&1
   exit 1
 fi
