@@ -1,8 +1,10 @@
 # ECS worker clamd config: memory-safe and SelfCheck for background def updates.
 # Used with: clamd -c /app/clamd.conf
 # Socket and DatabaseDirectory match Dockerfile.worker env (CLAMD_SOCKET, AV_DEFINITION_PATH).
+# TCPSocket enables PING/PONG healthcheck (same as official clamav/clamav image).
 
 LocalSocket /tmp/clamd.sock
+TCPSocket 3310
 DatabaseDirectory /var/lib/clamav
 
 # Memory-safe: unload old DB before loading new (avoids 2x RAM during reload)

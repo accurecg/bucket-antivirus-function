@@ -7,8 +7,8 @@ FROM clamav/clamav:stable
 
 USER root
 
-# Install Python for the worker
-RUN apk add --no-cache python3 py3-pip
+# Install Python and netcat (for clamd TCP PING healthcheck)
+RUN apk add --no-cache python3 py3-pip netcat-openbsd
 
 # tini as PID 1 (reaps zombies, forwards SIGTERM). Use static binary so we don't depend on base image repos.
 # For ARM64 Fargate tasks, switch to tini-static-arm64 or install tini via apk in a separate RUN.
