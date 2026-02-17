@@ -25,6 +25,9 @@ jobs:
   deploy:
     name: Build & Deploy
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC with AWS
+      contents: read    # For checkout
     steps:
       - name: Select AWS role ARN
         id: select-role

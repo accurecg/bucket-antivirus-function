@@ -47,7 +47,7 @@ pre_commit_install: .git/hooks/pre-commit ## Ensure pre-commit is installed
 
 .PHONY: pre_commit_tests
 pre_commit_tests: ## Run pre-commit tests
-	pre-commit run --all-files
+	python -m pre_commit run --all-files
 
 .PHONY: test
 test: clean  ## Run python tests
