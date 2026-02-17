@@ -57,7 +57,6 @@ Resources:
         Variables:
           AV_SCAN_QUEUE_URL: !Ref AVScanQueue
           AV_EXPECTED_BUCKET_KEY: !Ref AVExpectedBucketKey
-          AWS_REGION: !Ref AWS::Region
       Policies:
         - Version: "2012-10-17"
           Statement:
