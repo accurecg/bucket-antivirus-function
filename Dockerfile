@@ -34,7 +34,8 @@ RUN yumdownloader -x \*i686 --archlist=x86_64 \
     xz-libs \
     libprelude \
     gnutls \
-    nettle && \
+    nettle \
+    libcurl && \
     rpm2cpio clamav-0*.rpm | cpio -vimd && \
     rpm2cpio clamav-lib*.rpm | cpio -vimd && \
     rpm2cpio clamav-update*.rpm | cpio -vimd && \
@@ -47,6 +48,7 @@ RUN yumdownloader -x \*i686 --archlist=x86_64 \
     rpm2cpio libprelude*.rpm | cpio -vimd && \
     rpm2cpio gnutls*.rpm | cpio -vimd && \
     rpm2cpio nettle*.rpm | cpio -vimd && \
+    rpm2cpio libcurl*.rpm | cpio -vimd && \
     rm -f /tmp/*.rpm
 
 
