@@ -190,6 +190,14 @@ Resources:
               Value: !Ref AVStatusSNSArn
             - Name: AV_DELETE_INFECTED_FILES
               Value: "False"
+            - Name: AV_EXPECTED_BUCKET_KEY_STATUS
+              Value: "expectedBucketKeyStatus"
+            - Name: AV_SCAN_BUCKET
+              Value: "currentScanBucket"
+            - Name: AV_STATUS_METADATA
+              Value: "scanStatus"
+            - Name: AV_TIMESTAMP_METADATA
+              Value: "scanTimestamp"
             - Name: ENV
               Value: !Ref Environment
           HealthCheck:
