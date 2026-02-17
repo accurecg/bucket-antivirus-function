@@ -67,15 +67,21 @@ def _run_s3_tagging(s3_client, s3_object, scan_result, scan_signature, timestamp
 def _run_sns_publish(sns_client, s3_object, scan_result, scan_signature, timestamp):
     """SNS publish task. Logs errors without raising."""
     try:
-        if AV_STATUS_SNS_ARN not in [None, ""]:
-            scan.sns_scan_results(
-                sns_client,
-                s3_object,
-                AV_STATUS_SNS_ARN,
-                scan_result,
-                scan_signature,
-                timestamp,
+        if AV_STATUS_SNS_ARN in [None, ""]:
+            print(
+                "SNS publish skipped: AV_STATUS_SNS_ARN not set (check SSM aav.%s.AV_STATUS_SNS_ARN and deploy)"
+                % os.getenv("ENV", "dev"),
+                flush=True,
             )
+            return
+        scan.sns_scan_results(
+            sns_client,
+            s3_object,
+            AV_STATUS_SNS_ARN,
+            scan_result,
+            scan_signature,
+            timestamp,
+        )
     except Exception as e:
         print(
             "Post-processing SNS publish error for %s/%s: %s"

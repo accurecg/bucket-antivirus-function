@@ -176,12 +176,21 @@ def sns_scan_results(
 ):
     # Don't publish if scan_result is CLEAN and CLEAN results should not be published
     if scan_result == AV_STATUS_CLEAN and not str_to_bool(AV_STATUS_SNS_PUBLISH_CLEAN):
+        print(
+            "SNS publish skipped: AV_STATUS_SNS_PUBLISH_CLEAN=False (clean results not published)",
+            flush=True,
+        )
         return
     # Don't publish if scan_result is INFECTED and INFECTED results should not be published
     if scan_result == AV_STATUS_INFECTED and not str_to_bool(
         AV_STATUS_SNS_PUBLISH_INFECTED
     ):
+        print(
+            "SNS publish skipped: AV_STATUS_SNS_PUBLISH_INFECTED=False (infected results not published)",
+            flush=True,
+        )
         return
+    print("Publishing scan result to SNS: %s" % sns_arn, flush=True)
     message = {
         "bucket": s3_object.bucket_name,
         "key": s3_object.key,
