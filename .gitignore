@@ -120,3 +120,6 @@ tmp/
 
 # vscode
 .vscode/
+
+.aws-sam/
+ignore/

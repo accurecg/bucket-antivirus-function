@@ -17,6 +17,7 @@ repos:
       - id: check-json
       - id: check-merge-conflict
       - id: check-yaml
+        exclude: ^(template-antivirus|template)\.yaml$
       - id: debug-statements
       - id: detect-private-key
       - id: fix-encoding-pragma

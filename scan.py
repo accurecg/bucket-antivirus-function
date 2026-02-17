@@ -207,7 +207,7 @@ def sns_scan_results(
             AV_EXPECTED_BUCKET_KEY_STATUS: {
                 "DataType": "String",
                 "StringValue": "PRESENT"
-                if AV_EXPECTED_BUCKET_KEY in s3_object.key
+                if AV_EXPECTED_BUCKET_KEY and AV_EXPECTED_BUCKET_KEY in s3_object.key
                 else "NOT_PRESENT",
             },
         },

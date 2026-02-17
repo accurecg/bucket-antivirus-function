@@ -1,0 +1,361 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform:
+  - AWS::Serverless-2016-10-31
+  - AWS::LanguageExtensions
+
+Parameters:
+  Environment:
+    Type: String
+    Default: qa
+    AllowedValues:
+      - dev
+      - qa
+      - stg
+      - prod
+    Description: Environment name
+  ImageTag:
+    Type: String
+    Description: The tag of the Docker image to use for the ECS worker
+  ECRRepository:
+    Type: String
+    Default: bucket-antivirus-worker
+    Description: The name of the ECR repository for the worker image
+  CPU:
+    Type: String
+    Default: "1024"
+    Description: The number of CPU units to use for the ECS task
+  Memory:
+    Type: String
+    Default: "3072"
+    Description: The amount of memory (in MiB) to use for the ECS task
+  AVDefinitionS3Bucket:
+    Type: String
+    Default: ""
+    Description: S3 bucket for ClamAV definitions. Leave empty to create one.
+  AVExpectedBucketKey:
+    Type: String
+    Default: ""
+    Description: Key filter for enqueue Lambda (e.g. ecgfile). Only keys containing this string are enqueued.
+  AVStatusSNSArn:
+    Type: String
+    Default: ""
+    Description: SNS topic ARN for scan results. Leave empty to skip SNS notifications.
+  ScanBucketNames:
+    Type: String
+    Description: Comma-separated S3 bucket names the worker can scan (e.g. bucket1,bucket2,bucket3). No spaces.
+
+Conditions:
+  CreateDefinitionBucket: !Equals [!Ref AVDefinitionS3Bucket, ""]
+  HasAVStatusSNS: !Not [!Equals [!Ref AVStatusSNSArn, ""]]
+
+Resources:
+  AVScanQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "av-scan-queue-${Environment}"
+      VisibilityTimeout: 900
+      MessageRetentionPeriod: 1209600
+
+  AVDefinitionBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateDefinitionBucket
+    Properties:
+      BucketName: !Sub "av-definitions-${AWS::AccountId}-${Environment}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  EnqueueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "av-enqueue-${Environment}"
+      Handler: enqueue.lambda_handler
+      CodeUri: build/enqueue-lambda.zip
+      Runtime: python3.11
+      MemorySize: 128
+      Timeout: 60
+      Environment:
+        Variables:
+          AV_SCAN_QUEUE_URL: !Ref AVScanQueue
+          AV_EXPECTED_BUCKET_KEY: !Ref AVExpectedBucketKey
+          AWS_REGION: !Ref AWS::Region
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt AVScanQueue.Arn
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+
+  UpdateDefinitionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "av-update-definitions-${Environment}"
+      Handler: update.lambda_handler
+      CodeUri: build/lambda.zip
+      Runtime: python3.7
+      MemorySize: 1024
+      Timeout: 300
+      Environment:
+        Variables:
+          AV_DEFINITION_S3_BUCKET: !If
+            - CreateDefinitionBucket
+            - !Ref AVDefinitionBucket
+            - !Ref AVDefinitionS3Bucket
+          AV_DEFINITION_S3_PREFIX: clamav_defs
+          AV_DEFINITION_PATH: /tmp/clamav_defs
+          CLAMAVLIB_PATH: ./bin
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:GetObjectTagging
+                - s3:PutObjectTagging
+                - s3:ListBucket
+              Resource:
+                - !If
+                  - CreateDefinitionBucket
+                  - !Sub "arn:aws:s3:::${AVDefinitionBucket}/*"
+                  - !Sub "arn:aws:s3:::${AVDefinitionS3Bucket}/*"
+                - !If
+                  - CreateDefinitionBucket
+                  - !Sub "arn:aws:s3:::${AVDefinitionBucket}"
+                  - !Sub "arn:aws:s3:::${AVDefinitionS3Bucket}"
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+
+  UpdateDefinitionSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "av-update-definitions-schedule-${Environment}"
+      ScheduleExpression: rate(3 hours)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UpdateDefinitionFunction.Arn
+          Id: UpdateDefinitionFunction
+
+  UpdateDefinitionSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UpdateDefinitionFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UpdateDefinitionSchedule.Arn
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "bucket-antivirus-cluster-${Environment}"
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "av-ecs-execution-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "av-ecs-task-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AVWorkerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQS
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !GetAtt AVScanQueue.Arn
+              - Sid: S3ScannedBuckets
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectTagging
+                  - s3:PutObjectTagging
+                  - s3:DeleteObject
+                  - s3:GetObjectVersion
+                  - s3:GetObjectVersionTagging
+                  - s3:PutObjectVersionTagging
+                Resource: !For
+                  - Bucket
+                  - !Split
+                    - ","
+                    - !Ref ScanBucketNames
+                  - - !Sub "arn:aws:s3:::${Bucket}/*"
+                    - Bucket: !Ref Bucket
+              - Sid: S3ScannedBucketsList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !For
+                  - Bucket
+                  - !Split
+                    - ","
+                    - !Ref ScanBucketNames
+                  - - !Sub "arn:aws:s3:::${Bucket}"
+                    - Bucket: !Ref Bucket
+                Condition:
+                  StringLike:
+                    s3:prefix: ["*"]
+              - Sid: S3DefinitionsBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectTagging
+                  - s3:ListBucket
+                Resource:
+                  - !If
+                    - CreateDefinitionBucket
+                    - !Sub "arn:aws:s3:::${AVDefinitionBucket}"
+                    - !Sub "arn:aws:s3:::${AVDefinitionS3Bucket}"
+                  - !If
+                    - CreateDefinitionBucket
+                    - !Sub "arn:aws:s3:::${AVDefinitionBucket}/*"
+                    - !Sub "arn:aws:s3:::${AVDefinitionS3Bucket}/*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/bucket-antivirus-worker-${Environment}:*"
+              - !If
+                - HasAVStatusSNS
+                - Sid: SNS
+                  Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Ref AVStatusSNSArn
+                - !Ref AWS::NoValue
+
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/bucket-antivirus-worker-${Environment}"
+      RetentionInDays: 14
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for AV ECS worker
+      VpcId: !Sub "{{resolve:ssm:/aab.${Environment}.ALB_VPC_ID}}"
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - ECSTaskExecutionRole
+      - ECSTaskRole
+    Properties:
+      Family: !Sub "bucket-antivirus-worker-${Environment}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref CPU
+      Memory: !Ref Memory
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub "bucket-antivirus-worker-${Environment}"
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}:${ImageTag}"
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: AV_SCAN_QUEUE_URL
+              Value: !Ref AVScanQueue
+            - Name: AV_DEFINITION_S3_BUCKET
+              Value: !If
+                - CreateDefinitionBucket
+                - !Ref AVDefinitionBucket
+                - !Ref AVDefinitionS3Bucket
+            - Name: AV_DEFINITION_S3_PREFIX
+              Value: clamav_defs
+            - Name: AV_STATUS_SNS_ARN
+              Value: !Ref AVStatusSNSArn
+            - Name: AV_DELETE_INFECTED_FILES
+              Value: "False"
+            - Name: ENV
+              Value: !Ref Environment
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - /healthcheck.sh
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ECSTaskDefinition
+    Properties:
+      ServiceName: !Sub "bucket-antivirus-worker-${Environment}"
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      TaskDefinition: !Ref ECSTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Sub "{{resolve:ssm:/aab.${Environment}.PRIVATE_SUBNET_ID_1}}"
+            - !Sub "{{resolve:ssm:/aab.${Environment}.PRIVATE_SUBNET_ID_2}}"
+            - !Sub "{{resolve:ssm:/aab.${Environment}.PRIVATE_SUBNET_ID_3}}"
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+
+Outputs:
+  AVScanQueueUrl:
+    Description: SQS queue URL for scan jobs
+    Value: !Ref AVScanQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-AVScanQueueUrl"
+  EnqueueFunctionArn:
+    Description: ARN of the enqueue Lambda (add S3/SNS trigger manually)
+    Value: !GetAtt EnqueueFunction.Arn
+  AVDefinitionBucketName:
+    Description: S3 bucket for ClamAV definitions
+    Value: !If
+      - CreateDefinitionBucket
+      - !Ref AVDefinitionBucket
+      - !Ref AVDefinitionS3Bucket

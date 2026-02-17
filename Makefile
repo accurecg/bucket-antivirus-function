@@ -51,16 +51,17 @@ pre_commit_tests: ## Run pre-commit tests
 
 .PHONY: test
 test: clean  ## Run python tests
-	nosetests
+	python -m unittest discover -s . -p '*_test.py' -v
 
 .PHONY: coverage
 coverage: clean  ## Run python tests with coverage
-	nosetests --with-coverage
+	coverage run -m unittest discover -s . -p '*_test.py'
+	coverage report
 
 .PHONY: build-enqueue-lambda
-build-enqueue-lambda:  ## Build enqueue lambda zip at build/enqueue-lambda.zip
+build-enqueue-lambda:  ## Build enqueue lambda zip at build/enqueue-lambda.zip (enqueue.py only)
 	mkdir -p ./build/
-	zip -j build/enqueue-lambda.zip enqueue.py common.py
+	zip -j build/enqueue-lambda.zip enqueue.py
 
 .PHONY: build-worker
 build-worker:  ## Build ECS worker Docker image
