@@ -4,5 +4,5 @@ data_file = .coverage
 [report]
 omit =
   */python?.?/*
-  */site-packages/nose/*
+  */site-packages/*
 show_missing = true
