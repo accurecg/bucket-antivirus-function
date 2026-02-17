@@ -360,6 +360,66 @@ class TestScan(unittest.TestCase):
             set_av_tags(self.s3_client, s3_obj, scan_result, scan_signature, timestamp)
 
     def test_sns_scan_results(self):
+        from unittest.mock import patch
+
+        sns_stubber = Stubber(self.sns_client)
+        s3_stubber_resource = Stubber(self.s3.meta.client)
+
+        sns_arn = "some_arn"
+        version_id = "version-id"
+        scan_result = "CLEAN"
+        scan_signature = AV_SIGNATURE_OK
+        timestamp = get_timestamp()
+        expected_key = self.s3_key_name + "/ecgfile/test.json"
+        message = {
+            "bucket": self.s3_bucket_name,
+            "key": expected_key,
+            "version": version_id,
+            AV_SIGNATURE_METADATA: scan_signature,
+            AV_STATUS_METADATA: scan_result,
+            AV_TIMESTAMP_METADATA: timestamp,
+        }
+        publish_response = {"MessageId": "message_id"}
+        publish_expected_params = {
+            "TargetArn": sns_arn,
+            "Message": json.dumps({"default": json.dumps(message)}),
+            "MessageAttributes": {
+                "av-scan-bucket": {
+                    "DataType": "String",
+                    "StringValue": self.s3_bucket_name,
+                },
+                "av-status": {"DataType": "String", "StringValue": scan_result},
+                "av-signature": {"DataType": "String", "StringValue": scan_signature},
+                "av-expected-key-status": {
+                    "DataType": "String",
+                    "StringValue": "PRESENT",
+                },
+            },
+            "MessageStructure": "json",
+        }
+        sns_stubber.add_response("publish", publish_response, publish_expected_params)
+
+        head_object_response = {"VersionId": version_id}
+        head_object_expected_params = {
+            "Bucket": self.s3_bucket_name,
+            "Key": expected_key,
+        }
+        s3_stubber_resource.add_response(
+            "head_object", head_object_response, head_object_expected_params
+        )
+        with patch("scan.AV_EXPECTED_BUCKET_KEY", "ecgfile"):
+            with sns_stubber, s3_stubber_resource:
+                s3_obj = self.s3.Object(self.s3_bucket_name, expected_key)
+                sns_scan_results(
+                    self.sns_client,
+                    s3_obj,
+                    sns_arn,
+                    scan_result,
+                    scan_signature,
+                    timestamp,
+                )
+
+    def test_sns_scan_results_for_non_expected_key(self):
         sns_stubber = Stubber(self.sns_client)
         s3_stubber_resource = Stubber(self.s3.meta.client)
 
@@ -381,8 +441,16 @@ class TestScan(unittest.TestCase):
             "TargetArn": sns_arn,
             "Message": json.dumps({"default": json.dumps(message)}),
             "MessageAttributes": {
+                "av-scan-bucket": {
+                    "DataType": "String",
+                    "StringValue": self.s3_bucket_name,
+                },
                 "av-status": {"DataType": "String", "StringValue": scan_result},
                 "av-signature": {"DataType": "String", "StringValue": scan_signature},
+                "av-expected-key-status": {
+                    "DataType": "String",
+                    "StringValue": "NOT_PRESENT",
+                },
             },
             "MessageStructure": "json",
         }
