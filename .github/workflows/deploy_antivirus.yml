@@ -133,21 +133,18 @@ jobs:
       - name: Build and deploy Lambdas stack
         if: github.event.inputs.deploy_target == 'lambdas' || github.event.inputs.deploy_target == 'all'
         run: |
+          EXTRA_PARAMS=""
+          [ -n "${{ steps.ssm.outputs.av_definition_s3_bucket }}" ] && EXTRA_PARAMS="${EXTRA_PARAMS} AVDefinitionS3Bucket=${{ steps.ssm.outputs.av_definition_s3_bucket }}"
+          [ -n "${{ steps.ssm.outputs.av_expected_bucket_key }}" ] && EXTRA_PARAMS="${EXTRA_PARAMS} AVExpectedBucketKey=${{ steps.ssm.outputs.av_expected_bucket_key }}"
           sam build -t infra/template-antivirus-lambdas.yaml \
-            --parameter-overrides \
-              Environment=${{ github.event.inputs.environment }} \
-              AVDefinitionS3Bucket="${{ steps.ssm.outputs.av_definition_s3_bucket }}" \
-              AVExpectedBucketKey="${{ steps.ssm.outputs.av_expected_bucket_key }}"
+            --parameter-overrides Environment=${{ github.event.inputs.environment }}${EXTRA_PARAMS}
           sam deploy \
             --s3-bucket ${{ steps.ssm.outputs.sam_s3_bucket }} \
             --s3-prefix bucket-antivirus-lambdas-${{ github.event.inputs.environment }} \
             --stack-name bucket-antivirus-lambdas-${{ github.event.inputs.environment }} \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              Environment=${{ github.event.inputs.environment }} \
-              AVDefinitionS3Bucket="${{ steps.ssm.outputs.av_definition_s3_bucket }}" \
-              AVExpectedBucketKey="${{ steps.ssm.outputs.av_expected_bucket_key }}"
+            --parameter-overrides Environment=${{ github.event.inputs.environment }}${EXTRA_PARAMS}
 
       - name: Get Lambdas stack outputs
         if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
@@ -165,6 +162,8 @@ jobs:
       - name: Deploy Worker stack
         if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
         run: |
+          EXTRA_PARAMS=""
+          [ -n "${{ steps.ssm.outputs.av_status_sns_arn }}" ] && EXTRA_PARAMS="${EXTRA_PARAMS} AVStatusSNSArn=${{ steps.ssm.outputs.av_status_sns_arn }}"
           aws cloudformation deploy \
             --template-file infra/template-antivirus-worker.yaml \
             --stack-name bucket-antivirus-worker-${{ github.event.inputs.environment }} \
@@ -177,7 +176,6 @@ jobs:
               CPU=1024 \
               Memory=3072 \
               ScanBucketNames="${{ steps.ssm.outputs.av_scan_bucket_names }}" \
-              AVStatusSNSArn="${{ steps.ssm.outputs.av_status_sns_arn }}" \
               AVScanQueueUrl="${{ steps.lambdas.outputs.av_scan_queue_url }}" \
               AVScanQueueArn="${{ steps.lambdas.outputs.av_scan_queue_arn }}" \
-              AVDefinitionBucketName="${{ steps.lambdas.outputs.av_definition_bucket_name }}"
+              AVDefinitionBucketName="${{ steps.lambdas.outputs.av_definition_bucket_name }}"${EXTRA_PARAMS}
