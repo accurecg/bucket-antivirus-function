@@ -1,5 +1,4 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Transform: AWS::LanguageExtensions
 
 Parameters:
   Environment:
@@ -26,9 +25,12 @@ Parameters:
     Type: String
     Default: "3072"
     Description: The amount of memory (in MiB) to use for the ECS task
-  ScanBucketNames:
+  ScanBucketObjectArns:
     Type: String
-    Description: Comma-separated S3 bucket names the worker can scan (e.g. bucket1,bucket2,bucket3). No spaces.
+    Description: Comma-separated S3 object ARNs (e.g. arn:aws:s3:::bucket1/*,arn:aws:s3:::bucket2/*). Generated from bucket names.
+  ScanBucketListArns:
+    Type: String
+    Description: Comma-separated S3 bucket ARNs for ListBucket (e.g. arn:aws:s3:::bucket1,arn:aws:s3:::bucket2).
   AVStatusSNSArn:
     Type: String
     Default: ""
@@ -101,21 +103,15 @@ Resources:
                   - s3:GetObjectVersion
                   - s3:GetObjectVersionTagging
                   - s3:PutObjectVersionTagging
-                Resource: !For
-                  - Bucket
-                  - !Split
-                    - ","
-                    - !Ref ScanBucketNames
-                  - !Sub "arn:aws:s3:::${Bucket}/*"
+                Resource: !Split
+                  - ","
+                  - !Ref ScanBucketObjectArns
               - Sid: S3ScannedBucketsList
                 Effect: Allow
                 Action: s3:ListBucket
-                Resource: !For
-                  - Bucket
-                  - !Split
-                    - ","
-                    - !Ref ScanBucketNames
-                  - !Sub "arn:aws:s3:::${Bucket}"
+                Resource: !Split
+                  - ","
+                  - !Ref ScanBucketListArns
                 Condition:
                   StringLike:
                     s3:prefix: ["*"]

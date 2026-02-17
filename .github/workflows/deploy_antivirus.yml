@@ -172,6 +172,9 @@ jobs:
       - name: Deploy Worker stack
         if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
         run: |
+          BUCKETS="${{ steps.ssm.outputs.av_scan_bucket_names }}"
+          SCAN_BUCKET_OBJECT_ARNS=$(echo "$BUCKETS" | sed 's/\([^,]*\)/arn:aws:s3:::\1\/\*/g')
+          SCAN_BUCKET_LIST_ARNS=$(echo "$BUCKETS" | sed 's/\([^,]*\)/arn:aws:s3:::\1/g')
           EXTRA_PARAMS=""
           [ -n "${{ steps.ssm.outputs.av_status_sns_arn }}" ] && EXTRA_PARAMS="${EXTRA_PARAMS} AVStatusSNSArn=${{ steps.ssm.outputs.av_status_sns_arn }}"
           aws cloudformation deploy \
@@ -185,7 +188,8 @@ jobs:
               ECRRepository=${{ github.event.inputs.environment }}/bucket-antivirus-worker \
               CPU=1024 \
               Memory=3072 \
-              ScanBucketNames="${{ steps.ssm.outputs.av_scan_bucket_names }}" \
+              ScanBucketObjectArns="$SCAN_BUCKET_OBJECT_ARNS" \
+              ScanBucketListArns="$SCAN_BUCKET_LIST_ARNS" \
               AVScanQueueUrl="${{ steps.lambdas.outputs.av_scan_queue_url }}" \
               AVScanQueueArn="${{ steps.lambdas.outputs.av_scan_queue_arn }}" \
               AVDefinitionBucketName="${{ steps.lambdas.outputs.av_definition_bucket_name }}"${EXTRA_PARAMS}
