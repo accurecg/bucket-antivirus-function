@@ -1,4 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::LanguageExtensions
 
 Parameters:
   Environment:
@@ -105,8 +106,7 @@ Resources:
                   - !Split
                     - ","
                     - !Ref ScanBucketNames
-                  - - !Sub "arn:aws:s3:::${Bucket}/*"
-                    - Bucket: !Ref Bucket
+                  - !Sub "arn:aws:s3:::${Bucket}/*"
               - Sid: S3ScannedBucketsList
                 Effect: Allow
                 Action: s3:ListBucket
@@ -115,8 +115,7 @@ Resources:
                   - !Split
                     - ","
                     - !Ref ScanBucketNames
-                  - - !Sub "arn:aws:s3:::${Bucket}"
-                    - Bucket: !Ref Bucket
+                  - !Sub "arn:aws:s3:::${Bucket}"
                 Condition:
                   StringLike:
                     s3:prefix: ["*"]
