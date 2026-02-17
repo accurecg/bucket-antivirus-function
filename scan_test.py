@@ -369,7 +369,7 @@ class TestScan(unittest.TestCase):
         version_id = "version-id"
         scan_result = "CLEAN"
         scan_signature = AV_SIGNATURE_OK
-        timestamp = get_timestamp()
+        timestamp = "2026/02/17 18:00:00 UTC"
         expected_key = self.s3_key_name + "/ecgfile/test.json"
         message = {
             "bucket": self.s3_bucket_name,
@@ -407,7 +407,9 @@ class TestScan(unittest.TestCase):
         s3_stubber_resource.add_response(
             "head_object", head_object_response, head_object_expected_params
         )
-        with patch("scan.AV_EXPECTED_BUCKET_KEY", "ecgfile"):
+        with patch("scan.AV_EXPECTED_BUCKET_KEY", "ecgfile"), patch(
+            "scan.get_timestamp", return_value=timestamp
+        ):
             with sns_stubber, s3_stubber_resource:
                 s3_obj = self.s3.Object(self.s3_bucket_name, expected_key)
                 sns_scan_results(
@@ -420,6 +422,8 @@ class TestScan(unittest.TestCase):
                 )
 
     def test_sns_scan_results_for_non_expected_key(self):
+        from unittest.mock import patch
+
         sns_stubber = Stubber(self.sns_client)
         s3_stubber_resource = Stubber(self.s3.meta.client)
 
@@ -427,7 +431,7 @@ class TestScan(unittest.TestCase):
         version_id = "version-id"
         scan_result = "CLEAN"
         scan_signature = AV_SIGNATURE_OK
-        timestamp = get_timestamp()
+        timestamp = "2026/02/17 18:00:00 UTC"
         message = {
             "bucket": self.s3_bucket_name,
             "key": self.s3_key_name,
@@ -464,11 +468,19 @@ class TestScan(unittest.TestCase):
         s3_stubber_resource.add_response(
             "head_object", head_object_response, head_object_expected_params
         )
-        with sns_stubber, s3_stubber_resource:
-            s3_obj = self.s3.Object(self.s3_bucket_name, self.s3_key_name)
-            sns_scan_results(
-                self.sns_client, s3_obj, sns_arn, scan_result, scan_signature, timestamp
-            )
+        with patch("scan.AV_EXPECTED_BUCKET_KEY", "ecgfile"), patch(
+            "scan.get_timestamp", return_value=timestamp
+        ):
+            with sns_stubber, s3_stubber_resource:
+                s3_obj = self.s3.Object(self.s3_bucket_name, self.s3_key_name)
+                sns_scan_results(
+                    self.sns_client,
+                    s3_obj,
+                    sns_arn,
+                    scan_result,
+                    scan_signature,
+                    timestamp,
+                )
 
     def test_delete_s3_object(self):
         s3_stubber = Stubber(self.s3.meta.client)
