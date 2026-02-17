@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform:
+  - AWS::Serverless-2016-10-31
+  - AWS::LanguageExtensions
+
+Parameters:
+  Environment:
+    Type: String
+    Default: qa
+    AllowedValues:
+      - dev
+      - qa
+      - stg
+      - prod
+    Description: Environment name
+  AVDefinitionS3Bucket:
+    Type: String
+    Default: ""
+    Description: S3 bucket for ClamAV definitions. Leave empty to create one.
+  AVExpectedBucketKey:
+    Type: String
+    Default: ""
+    Description: Key filter for enqueue Lambda (e.g. ecgfile). Only keys containing this string are enqueued.
+
+Conditions:
+  CreateDefinitionBucket: !Equals [!Ref AVDefinitionS3Bucket, ""]
+
+Resources:
+  AVScanQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "av-scan-queue-${Environment}"
+      VisibilityTimeout: 900
+      MessageRetentionPeriod: 1209600
+
+  AVDefinitionBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateDefinitionBucket
+    Properties:
+      BucketName: !Sub "av-definitions-${AWS::AccountId}-${Environment}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  EnqueueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "av-enqueue-${Environment}"
+      Handler: enqueue.lambda_handler
+      CodeUri: ../build/enqueue-lambda.zip
+      Runtime: python3.11
+      MemorySize: 128
+      Timeout: 60
+      Environment:
+        Variables:
+          AV_SCAN_QUEUE_URL: !Ref AVScanQueue
+          AV_EXPECTED_BUCKET_KEY: !Ref AVExpectedBucketKey
+          AWS_REGION: !Ref AWS::Region
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt AVScanQueue.Arn
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+
+  UpdateDefinitionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "av-update-definitions-${Environment}"
+      Handler: update.lambda_handler
+      CodeUri: ../build/lambda.zip
+      Runtime: python3.7
+      MemorySize: 1024
+      Timeout: 300
+      Environment:
+        Variables:
+          AV_DEFINITION_S3_BUCKET: !If
+            - CreateDefinitionBucket
+            - !Ref AVDefinitionBucket
+            - !Ref AVDefinitionS3Bucket
+          AV_DEFINITION_S3_PREFIX: clamav_defs
+          AV_DEFINITION_PATH: /tmp/clamav_defs
+          CLAMAVLIB_PATH: ./bin
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:GetObjectTagging
+                - s3:PutObjectTagging
+                - s3:ListBucket
+              Resource:
+                - !If
+                  - CreateDefinitionBucket
+                  - !Sub "arn:aws:s3:::${AVDefinitionBucket}/*"
+                  - !Sub "arn:aws:s3:::${AVDefinitionS3Bucket}/*"
+                - !If
+                  - CreateDefinitionBucket
+                  - !Sub "arn:aws:s3:::${AVDefinitionBucket}"
+                  - !Sub "arn:aws:s3:::${AVDefinitionS3Bucket}"
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+
+  UpdateDefinitionSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "av-update-definitions-schedule-${Environment}"
+      ScheduleExpression: rate(3 hours)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UpdateDefinitionFunction.Arn
+          Id: UpdateDefinitionFunction
+
+  UpdateDefinitionSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UpdateDefinitionFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UpdateDefinitionSchedule.Arn
+
+Outputs:
+  AVScanQueueUrl:
+    Description: SQS queue URL for scan jobs
+    Value: !Ref AVScanQueue
+    Export:
+      Name: !Sub "bucket-antivirus-lambdas-${Environment}-AVScanQueueUrl"
+  AVScanQueueArn:
+    Description: SQS queue ARN for scan jobs
+    Value: !GetAtt AVScanQueue.Arn
+    Export:
+      Name: !Sub "bucket-antivirus-lambdas-${Environment}-AVScanQueueArn"
+  EnqueueFunctionArn:
+    Description: ARN of the enqueue Lambda (add S3/SNS trigger manually)
+    Value: !GetAtt EnqueueFunction.Arn
+  AVDefinitionBucketName:
+    Description: S3 bucket for ClamAV definitions
+    Value: !If
+      - CreateDefinitionBucket
+      - !Ref AVDefinitionBucket
+      - !Ref AVDefinitionS3Bucket
+    Export:
+      Name: !Sub "bucket-antivirus-lambdas-${Environment}-AVDefinitionBucketName"

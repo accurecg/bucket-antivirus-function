@@ -1,4 +1,5 @@
-# Deploy bucket-antivirus stack. Manual trigger with environment dropdown and branch input.
+# Deploy bucket-antivirus stacks. Manual trigger with environment, branch, and deploy target.
+# Lambdas stack must be deployed before worker on first setup.
 # Config fetched from SSM: aav.${Environment}.PARAM_NAME
 # Secrets: AWS_ROLE_ARN_DEV, AWS_ROLE_ARN_QA, AWS_ROLE_ARN_STG, AWS_ROLE_ARN_PROD
 name: Deploy Bucket Antivirus
@@ -20,6 +21,15 @@ on:
         required: true
         type: string
         default: 'qa'
+      deploy_target:
+        description: 'Deploy target'
+        required: true
+        type: choice
+        options:
+          - all
+          - lambdas
+          - worker
+        default: 'all'
 
 jobs:
   deploy:
@@ -71,21 +81,29 @@ jobs:
           echo "av_scan_bucket_names=$(aws ssm get-parameter --name "aav.${ENV}.AV_SCAN_BUCKET_NAMES" --query 'Parameter.Value' --output text)" >> $GITHUB_OUTPUT
           ARN=$(aws ssm get-parameter --name "aav.${ENV}.AV_STATUS_SNS_ARN" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
           echo "av_status_sns_arn=$ARN" >> $GITHUB_OUTPUT
+          BUCKET=$(aws ssm get-parameter --name "aav.${ENV}.AV_DEFINITION_S3_BUCKET" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+          echo "av_definition_s3_bucket=$BUCKET" >> $GITHUB_OUTPUT
+          KEY=$(aws ssm get-parameter --name "aav.${ENV}.AV_EXPECTED_BUCKET_KEY" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+          echo "av_expected_bucket_key=$KEY" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
+        if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Amazon ECR
+        if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Create ECR repository if not exists
+        if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
         run: |
           ECR_REPOSITORY="${{ github.event.inputs.environment }}/bucket-antivirus-worker"
           aws ecr describe-repositories --repository-names ${ECR_REPOSITORY} || \
           aws ecr create-repository --repository-name ${ECR_REPOSITORY}
 
       - name: Build, tag, and push worker image
+        if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ github.event.inputs.environment }}/bucket-antivirus-worker
@@ -95,9 +113,11 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
       - name: Build update Lambda
+        if: github.event.inputs.deploy_target == 'lambdas' || github.event.inputs.deploy_target == 'all'
         run: make archive
 
       - name: Build enqueue Lambda zip
+        if: github.event.inputs.deploy_target == 'lambdas' || github.event.inputs.deploy_target == 'all'
         run: |
           mkdir -p build
           zip -j build/enqueue-lambda.zip enqueue.py
@@ -110,32 +130,45 @@ jobs:
       - name: Install AWS SAM CLI
         run: pip install aws-sam-cli
 
-      - name: Build SAM application
+      - name: Build and deploy Lambdas stack
+        if: github.event.inputs.deploy_target == 'lambdas' || github.event.inputs.deploy_target == 'all'
         run: |
-          EXTRA_PARAMS=""
-          if [ -n "${{ steps.ssm.outputs.av_status_sns_arn }}" ]; then
-            EXTRA_PARAMS=" AVStatusSNSArn=${{ steps.ssm.outputs.av_status_sns_arn }}"
-          fi
-          sam build -t template-antivirus.yaml \
+          sam build -t infra/template-antivirus-lambdas.yaml \
             --parameter-overrides \
               Environment=${{ github.event.inputs.environment }} \
-              ImageTag=${{ github.sha }}-${{ github.event.inputs.environment }} \
-              ECRRepository=${{ github.event.inputs.environment }}/bucket-antivirus-worker \
-              CPU=1024 \
-              Memory=3072 \
-              ScanBucketNames="${{ steps.ssm.outputs.av_scan_bucket_names }}"${EXTRA_PARAMS}
-
-      - name: Deploy SAM application
-        run: |
-          EXTRA_PARAMS=""
-          if [ -n "${{ steps.ssm.outputs.av_status_sns_arn }}" ]; then
-            EXTRA_PARAMS=" AVStatusSNSArn=${{ steps.ssm.outputs.av_status_sns_arn }}"
-          fi
+              AVDefinitionS3Bucket="${{ steps.ssm.outputs.av_definition_s3_bucket }}" \
+              AVExpectedBucketKey="${{ steps.ssm.outputs.av_expected_bucket_key }}"
           sam deploy \
             --s3-bucket ${{ steps.ssm.outputs.sam_s3_bucket }} \
-            --s3-prefix bucket-antivirus-${{ github.event.inputs.environment }} \
-            --stack-name bucket-antivirus-${{ github.event.inputs.environment }} \
+            --s3-prefix bucket-antivirus-lambdas-${{ github.event.inputs.environment }} \
+            --stack-name bucket-antivirus-lambdas-${{ github.event.inputs.environment }} \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment=${{ github.event.inputs.environment }} \
+              AVDefinitionS3Bucket="${{ steps.ssm.outputs.av_definition_s3_bucket }}" \
+              AVExpectedBucketKey="${{ steps.ssm.outputs.av_expected_bucket_key }}"
+
+      - name: Get Lambdas stack outputs
+        if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
+        id: lambdas
+        run: |
+          ENV="${{ github.event.inputs.environment }}"
+          LAMBDAS_STACK="bucket-antivirus-lambdas-${ENV}"
+          AV_SCAN_QUEUE_URL=$(aws cloudformation describe-stacks --stack-name $LAMBDAS_STACK --query "Stacks[0].Outputs[?OutputKey=='AVScanQueueUrl'].OutputValue" --output text)
+          AV_SCAN_QUEUE_ARN=$(aws cloudformation describe-stacks --stack-name $LAMBDAS_STACK --query "Stacks[0].Outputs[?OutputKey=='AVScanQueueArn'].OutputValue" --output text)
+          AV_DEF_BUCKET=$(aws cloudformation describe-stacks --stack-name $LAMBDAS_STACK --query "Stacks[0].Outputs[?OutputKey=='AVDefinitionBucketName'].OutputValue" --output text)
+          echo "av_scan_queue_url=$AV_SCAN_QUEUE_URL" >> $GITHUB_OUTPUT
+          echo "av_scan_queue_arn=$AV_SCAN_QUEUE_ARN" >> $GITHUB_OUTPUT
+          echo "av_definition_bucket_name=$AV_DEF_BUCKET" >> $GITHUB_OUTPUT
+
+      - name: Deploy Worker stack
+        if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/template-antivirus-worker.yaml \
+            --stack-name bucket-antivirus-worker-${{ github.event.inputs.environment }} \
+            --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
             --parameter-overrides \
               Environment=${{ github.event.inputs.environment }} \
@@ -143,4 +176,8 @@ jobs:
               ECRRepository=${{ github.event.inputs.environment }}/bucket-antivirus-worker \
               CPU=1024 \
               Memory=3072 \
-              ScanBucketNames="${{ steps.ssm.outputs.av_scan_bucket_names }}"${EXTRA_PARAMS}
+              ScanBucketNames="${{ steps.ssm.outputs.av_scan_bucket_names }}" \
+              AVStatusSNSArn="${{ steps.ssm.outputs.av_status_sns_arn }}" \
+              AVScanQueueUrl="${{ steps.lambdas.outputs.av_scan_queue_url }}" \
+              AVScanQueueArn="${{ steps.lambdas.outputs.av_scan_queue_arn }}" \
+              AVDefinitionBucketName="${{ steps.lambdas.outputs.av_definition_bucket_name }}"
