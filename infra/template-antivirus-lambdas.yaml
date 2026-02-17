@@ -77,7 +77,7 @@ Resources:
       FunctionName: !Sub "av-update-definitions-${Environment}"
       Handler: update.lambda_handler
       CodeUri: ../build/lambda.zip
-      Runtime: python3.7
+      Runtime: python3.11
       MemorySize: 1024
       Timeout: 300
       Environment:
