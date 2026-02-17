@@ -10,16 +10,17 @@ WORKDIR /opt/app
 COPY ./*.py /opt/app/
 COPY requirements.txt /opt/app/requirements.txt
 
-# Install packages
-RUN yum update -y && \
-    amazon-linux-extras install epel -y && \
-    yum install -y cpio yum-utils tar.x86_64 gzip zip python3-pip
+# Install packages (skip full yum update to save image space; install only what we need)
+RUN amazon-linux-extras install epel -y && \
+    yum install -y cpio yum-utils tar.x86_64 gzip zip python3-pip && \
+    yum clean all && rm -rf /var/cache/yum
 
 # This had --no-cache-dir, tracing through multiple tickets led to a problem in wheel
 RUN pip3 install -r requirements.txt && \
     rm -rf /root/.cache/pip
 
-# Download libraries we need to run in lambda
+# Download libraries we need to run in lambda (clean cache first to free space for downloads)
+RUN yum clean all && rm -rf /var/cache/yum
 WORKDIR /tmp
 RUN yumdownloader -x \*i686 --archlist=x86_64 \
     clamav \
@@ -45,7 +46,8 @@ RUN yumdownloader -x \*i686 --archlist=x86_64 \
     rpm2cpio xz-libs*.rpm | cpio -vimd && \
     rpm2cpio libprelude*.rpm | cpio -vimd && \
     rpm2cpio gnutls*.rpm | cpio -vimd && \
-    rpm2cpio nettle*.rpm | cpio -vimd
+    rpm2cpio nettle*.rpm | cpio -vimd && \
+    rm -f /tmp/*.rpm
 
 
 # Copy over the binaries and libraries
@@ -74,3 +76,4 @@ WORKDIR /usr/local/lib/python3.7/site-packages
 RUN zip -r9 /opt/app/build/lambda.zip *
 
 WORKDIR /opt/app
+

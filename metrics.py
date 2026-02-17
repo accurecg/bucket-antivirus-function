@@ -15,40 +15,47 @@
 
 import os
 
-import datadog
 from common import AV_STATUS_CLEAN
 from common import AV_STATUS_INFECTED
 
 
 def send(env, bucket, key, status):
-    if "DATADOG_API_KEY" in os.environ:
-        datadog.initialize()  # by default uses DATADOG_API_KEY
+    if "DATADOG_API_KEY" not in os.environ:
+        return
+    try:
+        import datadog
+    except ImportError:
+        # datadog 0.26.x is incompatible with Python 3.10+ (collections.Iterable moved to collections.abc)
+        print("Datadog metrics skipped: datadog module unavailable or incompatible.")
+        return
 
-        result_metric_name = "unknown"
+    datadog.initialize()  # by default uses DATADOG_API_KEY
 
-        metric_tags = ["env:%s" % env, "bucket:%s" % bucket, "object:%s" % key]
+    result_metric_name = "unknown"
 
-        if status == AV_STATUS_CLEAN:
-            result_metric_name = "clean"
-        elif status == AV_STATUS_INFECTED:
-            result_metric_name = "infected"
-            datadog.api.Event.create(
-                title="Infected S3 Object Found",
-                text="Virus found in s3://%s/%s." % (bucket, key),
-                tags=metric_tags,
-            )
+    metric_tags = ["env:%s" % env, "bucket:%s" % bucket, "object:%s" % key]
 
-        scanned_metric = {
-            "metric": "s3_antivirus.scanned",
-            "type": "counter",
-            "points": 1,
-            "tags": metric_tags,
-        }
-        result_metric = {
-            "metric": "s3_antivirus.%s" % result_metric_name,
-            "type": "counter",
-            "points": 1,
-            "tags": metric_tags,
-        }
-        print("Sending metrics to Datadog.")
-        datadog.api.Metric.send([scanned_metric, result_metric])
+    if status == AV_STATUS_CLEAN:
+        result_metric_name = "clean"
+    elif status == AV_STATUS_INFECTED:
+        result_metric_name = "infected"
+        datadog.api.Event.create(
+            title="Infected S3 Object Found",
+            text="Virus found in s3://%s/%s." % (bucket, key),
+            tags=metric_tags,
+        )
+
+    scanned_metric = {
+        "metric": "s3_antivirus.scanned",
+        "type": "counter",
+        "points": 1,
+        "tags": metric_tags,
+    }
+    result_metric = {
+        "metric": "s3_antivirus.%s" % result_metric_name,
+        "type": "counter",
+        "points": 1,
+        "tags": metric_tags,
+    }
+    print("Sending metrics to Datadog.")
+    datadog.api.Metric.send([scanned_metric, result_metric])

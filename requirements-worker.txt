@@ -1,0 +1,12 @@
+# Dependencies for the ECS queue worker (Docker).
+# Lambda uses runtime-provided boto3, so it is not in requirements.txt.
+boto3>=1.26.0
+certifi==2018.11.29
+chardet==3.0.4
+datadog==0.26.0
+decorator==4.3
+idna==2.8
+requests==2.28
+simplejson==3.16
+urllib3==1.26.5
+pytz==2019.3

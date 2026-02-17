@@ -16,8 +16,8 @@
 import copy
 import json
 import os
+import time
 from urllib.parse import unquote_plus
-from distutils.util import strtobool
 
 import boto3
 
@@ -114,7 +114,10 @@ def delete_s3_object(s3_object):
             % (s3_object.bucket_name, s3_object.key)
         )
     else:
-        print("Infected file deleted: %s.%s" % (s3_object.bucket_name, s3_object.key))
+        print(
+            "Infected file deleted: %s.%s" % (s3_object.bucket_name, s3_object.key),
+            flush=True,
+        )
 
 
 def set_av_metadata(s3_object, scan_result, scan_signature, timestamp):
@@ -192,7 +195,10 @@ def sns_scan_results(
         Message=json.dumps({"default": json.dumps(message)}),
         MessageStructure="json",
         MessageAttributes={
-            AV_SCAN_BUCKET: {"DataType": "String", "StringValue": s3_object.bucket_name},
+            AV_SCAN_BUCKET: {
+                "DataType": "String",
+                "StringValue": s3_object.bucket_name,
+            },
             AV_STATUS_METADATA: {"DataType": "String", "StringValue": scan_result},
             AV_SIGNATURE_METADATA: {
                 "DataType": "String",
@@ -200,60 +206,63 @@ def sns_scan_results(
             },
             AV_EXPECTED_BUCKET_KEY_STATUS: {
                 "DataType": "String",
-                "StringValue": "PRESENT" if AV_EXPECTED_BUCKET_KEY in s3_object.key else "NOT_PRESENT"
+                "StringValue": "PRESENT"
+                if AV_EXPECTED_BUCKET_KEY in s3_object.key
+                else "NOT_PRESENT",
             },
         },
     )
 
 
-def lambda_handler(event, context):
-    s3 = boto3.resource("s3")
-    s3_client = boto3.client("s3")
-    sns_client = boto3.client("sns")
-
-    # Get some environment variables
+def scan_one_object_from_path(
+    s3_object,
+    file_path,
+    *,
+    s3_resource=None,
+    s3_client=None,
+    sns_client=None,
+    skip_post_processing=False,
+):
+    """
+    Scan an already-downloaded file with ClamAV, set tags/metadata, publish SNS, send metrics.
+    Used by the ECS worker prefetch pipeline; caller owns file_path and must os.remove it.
+    Does not download; assumes file exists at file_path.
+    When skip_post_processing=True, only runs the scan and optional set_av_metadata; the caller
+    is responsible for S3 tagging, SNS publish, SQS delete (e.g. via worker.run_post_processing_tasks).
+    Returns (scan_result, scan_signature).
+    """
+    s3 = s3_resource if s3_resource is not None else boto3.resource("s3")
+    s3_client = s3_client if s3_client is not None else boto3.client("s3")
+    sns_client = sns_client if sns_client is not None else boto3.client("sns")
     ENV = os.getenv("ENV", "")
-    EVENT_SOURCE = os.getenv("EVENT_SOURCE", "S3")
-
-    start_time = get_timestamp()
-    print("Script starting at %s\n" % (start_time))
-    s3_object = event_object(event, event_source=EVENT_SOURCE)
 
     if str_to_bool(AV_PROCESS_ORIGINAL_VERSION_ONLY):
         verify_s3_object_version(s3, s3_object)
 
-    # Publish the start time of the scan
     if AV_SCAN_START_SNS_ARN not in [None, ""]:
         start_scan_time = get_timestamp()
         sns_start_scan(sns_client, s3_object, AV_SCAN_START_SNS_ARN, start_scan_time)
 
-    file_path = get_local_path(s3_object, "/tmp")
-    create_dir(os.path.dirname(file_path))
-    s3_object.download_file(file_path)
-
-    to_download = clamav.update_defs_from_s3(
-        s3_client, AV_DEFINITION_S3_BUCKET, AV_DEFINITION_S3_PREFIX
-    )
-
-    for download in to_download.values():
-        s3_path = download["s3_path"]
-        local_path = download["local_path"]
-        print("Downloading definition file %s from s3://%s" % (local_path, s3_path))
-        s3.Bucket(AV_DEFINITION_S3_BUCKET).download_file(s3_path, local_path)
-        print("Downloading definition file %s complete!" % (local_path))
+    s3_uri = "s3://%s/%s" % (s3_object.bucket_name, s3_object.key)
+    print("Starting scan of %s (local path: %s)" % (s3_uri, file_path), flush=True)
+    scan_start = time.time()
     scan_result, scan_signature = clamav.scan_file(file_path)
+    scan_elapsed = time.time() - scan_start
     print(
-        "Scan of s3://%s resulted in %s\n"
-        % (os.path.join(s3_object.bucket_name, s3_object.key), scan_result)
+        "Scan completed for %s in %.2f s - result: %s\n"
+        % (s3_uri, scan_elapsed, scan_result),
+        flush=True,
     )
 
     result_time = get_timestamp()
-    # Set the properties on the object with the scan results
     if "AV_UPDATE_METADATA" in os.environ:
         set_av_metadata(s3_object, scan_result, scan_signature, result_time)
+
+    if skip_post_processing:
+        return scan_result, scan_signature
+
     set_av_tags(s3_client, s3_object, scan_result, scan_signature, result_time)
 
-    # Publish the scan results
     if AV_STATUS_SNS_ARN not in [None, ""]:
         sns_scan_results(
             sns_client,
@@ -267,16 +276,124 @@ def lambda_handler(event, context):
     metrics.send(
         env=ENV, bucket=s3_object.bucket_name, key=s3_object.key, status=scan_result
     )
-    # Delete downloaded file to free up room on re-usable lambda function container
+    return scan_result, scan_signature
+
+
+def scan_one_object(
+    s3_object,
+    *,
+    skip_def_update=False,
+    s3_resource=None,
+    s3_client=None,
+    sns_client=None,
+):
+    """
+    Download the S3 object, scan with ClamAV, set tags/metadata, publish SNS, send metrics.
+    Used by both the Lambda handler and the ECS queue worker.
+
+    When skip_def_update=True (ECS worker), def updates are handled by a background thread;
+    pass s3_resource, s3_client, sns_client for connection reuse.
+    """
+    s3 = s3_resource if s3_resource is not None else boto3.resource("s3")
+    s3_client = s3_client if s3_client is not None else boto3.client("s3")
+    sns_client = sns_client if sns_client is not None else boto3.client("sns")
+    ENV = os.getenv("ENV", "")
+
+    start_time = get_timestamp()
+    print("Script starting at %s\n" % (start_time), flush=True)
+
+    if str_to_bool(AV_PROCESS_ORIGINAL_VERSION_ONLY):
+        verify_s3_object_version(s3, s3_object)
+
+    if AV_SCAN_START_SNS_ARN not in [None, ""]:
+        start_scan_time = get_timestamp()
+        sns_start_scan(sns_client, s3_object, AV_SCAN_START_SNS_ARN, start_scan_time)
+
+    file_path = get_local_path(s3_object, "/tmp")
+    create_dir(os.path.dirname(file_path))
+    scan_result = None
+
     try:
-        os.remove(file_path)
-    except OSError:
-        pass
-    if str_to_bool(AV_DELETE_INFECTED_FILES) and scan_result == AV_STATUS_INFECTED:
+        s3_object.download_file(file_path)
+
+        if not skip_def_update:
+            to_download = clamav.update_defs_from_s3(
+                s3_client, AV_DEFINITION_S3_BUCKET, AV_DEFINITION_S3_PREFIX
+            )
+            for download in to_download.values():
+                s3_path = download["s3_path"]
+                local_path = download["local_path"]
+                print(
+                    "Downloading definition file %s from s3://%s"
+                    % (local_path, s3_path),
+                    flush=True,
+                )
+                s3.Bucket(AV_DEFINITION_S3_BUCKET).download_file(s3_path, local_path)
+                print(
+                    "Downloading definition file %s complete!" % (local_path),
+                    flush=True,
+                )
+
+        s3_uri = "s3://%s/%s" % (s3_object.bucket_name, s3_object.key)
+        print("Starting scan of %s (local path: %s)" % (s3_uri, file_path), flush=True)
+        scan_start = time.time()
+        scan_result, scan_signature = clamav.scan_file(file_path)
+        scan_elapsed = time.time() - scan_start
+        print(
+            "Scan completed for %s in %.2f s - result: %s\n"
+            % (s3_uri, scan_elapsed, scan_result),
+            flush=True,
+        )
+
+        result_time = get_timestamp()
+        if "AV_UPDATE_METADATA" in os.environ:
+            set_av_metadata(s3_object, scan_result, scan_signature, result_time)
+        set_av_tags(s3_client, s3_object, scan_result, scan_signature, result_time)
+
+        if AV_STATUS_SNS_ARN not in [None, ""]:
+            sns_scan_results(
+                sns_client,
+                s3_object,
+                AV_STATUS_SNS_ARN,
+                scan_result,
+                scan_signature,
+                result_time,
+            )
+
+        metrics.send(
+            env=ENV, bucket=s3_object.bucket_name, key=s3_object.key, status=scan_result
+        )
+    finally:
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+
+    should_delete_infected = (
+        scan_result is not None
+        and str_to_bool(AV_DELETE_INFECTED_FILES)
+        and scan_result == AV_STATUS_INFECTED
+    )
+    if should_delete_infected:
         delete_s3_object(s3_object)
     stop_scan_time = get_timestamp()
-    print("Script finished at %s\n" % stop_scan_time)
+    print("Script finished at %s\n" % stop_scan_time, flush=True)
+
+
+def lambda_handler(event, context):
+    EVENT_SOURCE = os.getenv("EVENT_SOURCE", "S3")
+    s3_object = event_object(event, event_source=EVENT_SOURCE)
+    if AV_EXPECTED_BUCKET_KEY and AV_EXPECTED_BUCKET_KEY not in s3_object.key:
+        print("Skipping scan for non ecg file - %s" % (s3_object.key), flush=True)
+        return
+    scan_one_object(s3_object)
 
 
 def str_to_bool(s):
-    return bool(strtobool(str(s)))
+    """Convert string to bool; compatible with distutils.util.strtobool (removed in Python 3.12)."""
+    v = str(s).lower()
+    if v in ("yes", "true", "1", "on"):
+        return True
+    if v in ("no", "false", "0", "off"):
+        return False
+    raise ValueError("Invalid truth value: %s" % s)

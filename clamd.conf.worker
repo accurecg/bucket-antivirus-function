@@ -1,0 +1,15 @@
+# ECS worker clamd config: memory-safe and SelfCheck for background def updates.
+# Used with: clamd -c /app/clamd.conf
+# Socket and DatabaseDirectory match Dockerfile.worker env (CLAMD_SOCKET, AV_DEFINITION_PATH).
+
+LocalSocket /tmp/clamd.sock
+DatabaseDirectory /var/lib/clamav
+
+# Memory-safe: unload old DB before loading new (avoids 2x RAM during reload)
+ConcurrentDatabaseReload no
+
+# Check /var/lib/clamav every 10 min for new .cvd/.cld; auto-reload when files change
+SelfCheck 600
+
+# CloudWatch-friendly timestamps
+LogTime yes

@@ -270,12 +270,66 @@ the table below for reference.
 | AV_STATUS_SNS_PUBLISH_INFECTED | Publish AV_STATUS_INFECTED results to AV_STATUS_SNS_ARN | True | No |
 | AV_TIMESTAMP_METADATA | The tag/metadata name representing file's scan time | av-timestamp | No |
 | CLAMAVLIB_PATH | Path to ClamAV library files | ./bin | No |
-| CLAMSCAN_PATH | Path to ClamAV clamscan binary | ./bin/clamscan | No |
+| CLAMSCAN_PATH | Path to ClamAV clamscan binary (used when CLAMDSCAN_PATH is not set, e.g. Lambda) | ./bin/clamscan | No |
+| CLAMDSCAN_PATH | Path to clamdscan binary; if set, scans use the clamd daemon (ECS worker) | (empty) | No |
+| CLAMD_SOCKET | Unix socket path for clamd (used when CLAMDSCAN_PATH is set) | /tmp/clamd.sock | No |
 | FRESHCLAM_PATH | Path to ClamAV freshclam binary | ./bin/freshclam | No |
 | DATADOG_API_KEY | API Key for pushing metrics to DataDog (optional) | | No |
 | AV_PROCESS_ORIGINAL_VERSION_ONLY | Controls that only original version of an S3 key is processed (if bucket versioning is enabled) | False | No |
 | AV_DELETE_INFECTED_FILES | Controls whether infected files should be automatically deleted | False | No |
 | EVENT_SOURCE | The source of antivirus scan event "S3" or "SNS" (optional) | S3 | No |
+| AV_SCAN_QUEUE_URL | SQS queue URL for the Dockerised worker (enqueue Lambda and ECS worker) | | No |
+| AV_EXPECTED_BUCKET_KEY | If set, only object keys containing this string are scanned (e.g. `ecgfile`) | | No |
+
+## Which files are needed for the dockerised setup
+
+With the **official ClamAV Docker image** as the base, you do **not** need to bundle ClamAV binaries in this repo. File roles:
+
+| Use | Files |
+|-----|--------|
+| **ECS worker image** (Dockerfile.worker) | `common.py`, `clamav.py`, `metrics.py`, `scan.py`, `worker.py`, `requirements-worker.txt`. ClamAV comes from the base image. |
+| **Enqueue Lambda** (S3 → SQS filter) | `enqueue.py`, `common.py` (for `AV_EXPECTED_BUCKET_KEY`, `AV_SCAN_QUEUE_URL`). |
+| **Update Lambda** (refreshes defs in S3) | `update.py`, `clamav.py`, `common.py`, and the **original Dockerfile** + **Makefile** to build a zip that includes `freshclam` (Lambda has no ClamAV in the runtime). |
+| **Legacy scan Lambda** (optional) | Same zip as before (original Dockerfile/Makefile). Only needed if you still run the scan Lambda instead of the ECS worker. |
+
+Tests (`*_test.py`), `scripts/run-update-lambda`, and config files are kept for development and for running the Update Lambda locally.
+
+## Dockerised ECS queue worker
+
+You can run the scanner as a long-running ECS service that long-polls an SQS queue instead of using the scan Lambda. This uses the official ClamAV Docker image and scales by queue depth.
+
+1. **SQS queue**: Create a standard SQS queue for scan jobs.
+2. **Enqueue Lambda**: Deploy `enqueue.py` as a Lambda triggered by S3 object create (or SNS from S3). Set `AV_SCAN_QUEUE_URL` and `AV_EXPECTED_BUCKET_KEY` (e.g. `ecgfile`). The Lambda only enqueues messages when the object key contains that string (e.g. `uuid/ecgfile/another-uuid.json`).
+3. **Worker image**: Build the worker image with the official ClamAV image as base:
+
+   ```sh
+   docker build -f Dockerfile.worker -t bucket-antivirus-worker .
+   ```
+
+4. **ECS**: Run the image as an ECS Service with the same environment variables as the scan Lambda (e.g. `AV_DEFINITION_S3_BUCKET`, `AV_DEFINITION_S3_PREFIX`, `AV_STATUS_SNS_ARN`, `AV_SCAN_QUEUE_URL`). The worker image starts **clamd** in the background and uses **clamdscan** to scan files (definitions stay in memory; faster than clamscan per file). Defaults in the Dockerfile: `CLAMDSCAN_PATH=/usr/bin/clamdscan`, `CLAMD_SOCKET=/tmp/clamd.sock`, `AV_DEFINITION_PATH=/var/lib/clamav`. Allocate at least 3–4 GiB RAM per task. Use Application Auto Scaling to scale task count by SQS `ApproximateNumberOfMessagesVisible`.
+
+The container entrypoint starts clamd (with `clamd.conf` tuned for memory and SelfCheck), waits for its socket, then runs the Python worker. The worker long-polls SQS (e.g. 20s), processes one message (download S3 object, run clamdscan, set tags/metadata, SNS, metrics), deletes the message, and repeats. Virus definition updates run in a background thread every 60 minutes; clamd's SelfCheck (every 10 min) auto-reloads when new .cvd files appear on disk, so the per-scan path stays fast (&lt;300ms).
+
+### Health check (dual liveness: clamd + worker)
+
+The image uses **tini** as PID 1 (zombie reaping, SIGTERM forwarding) and includes a dual-liveness **health check** script at `/healthcheck.sh`:
+
+1. **ClamAV daemon:** `clamdscan --ping` to ensure clamd is responsive.
+2. **Application:** `pgrep -f worker.py` to ensure the Python worker process is running.
+
+Health check output is written to PID 1’s stdout so successes and failures appear in the container’s CloudWatch log stream.
+
+**ECS task definition:** Configure the container’s `healthCheck` so the task is only marked HEALTHY when both processes are up. Use a **startPeriod** of at least **60 seconds** so ClamAV’s ~17s signature load time does not cause premature unhealthy marks. Example (add to your task definition’s container definition):
+
+| Field         | Value                          |
+|---------------|---------------------------------|
+| `command`     | `["CMD-SHELL", "/healthcheck.sh"]` |
+| `interval`    | 30                              |
+| `timeout`     | 5                               |
+| `retries`     | 3                               |
+| `startPeriod` | **60** (critical for clamd startup) |
+
+See `ecs-task-definition-healthcheck.example.json` for a copy-paste snippet.
 
 ## S3 Bucket Policy Examples
 
@@ -329,20 +383,6 @@ It should be in the format provided below:
   ]
 }
 ```
-
-## Manually Scanning Buckets
-
-You may want to scan all the objects in a bucket that have not previously been scanned or were created
-prior to setting up your lambda functions. To do this you can use the `scan_bucket.py` utility.
-
-```sh
-pip install boto3
-scan_bucket.py --lambda-function-name=<lambda_function_name> --s3-bucket-name=<s3-bucket-to-scan>
-```
-
-This tool will scan all objects that have not been previously scanned in the bucket and invoke the lambda function
-asynchronously. As such you'll have to go to your cloudwatch logs to see the scan results or failures. Additionally,
-the script uses the same environment variables you'd use in your lambda so you can configure them similarly.
 
 ## Testing
 

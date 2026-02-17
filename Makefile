@@ -57,9 +57,18 @@ test: clean  ## Run python tests
 coverage: clean  ## Run python tests with coverage
 	nosetests --with-coverage
 
-.PHONY: scan
-scan: ./build/lambda.zip ## Run scan function locally
-	scripts/run-scan-lambda $(TEST_BUCKET) $(TEST_KEY)
+.PHONY: build-enqueue-lambda
+build-enqueue-lambda:  ## Build enqueue lambda zip at build/enqueue-lambda.zip
+	mkdir -p ./build/
+	zip -j build/enqueue-lambda.zip enqueue.py common.py
+
+.PHONY: build-worker
+build-worker:  ## Build ECS worker Docker image
+	docker build -f Dockerfile.worker -t bucket-antivirus-worker .
+
+.PHONY: build-update-lambda
+build-update-lambda: archive  ## Alias for archive (build lambda.zip for update lambda)
+	@true
 
 .PHONY: update
 update: ./build/lambda.zip ## Run update function locally
