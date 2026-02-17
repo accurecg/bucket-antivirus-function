@@ -1,0 +1,143 @@
+# Deploy bucket-antivirus stack. Manual trigger with environment dropdown and branch input.
+# Config fetched from SSM: aav.${Environment}.PARAM_NAME
+# Secrets: AWS_ROLE_ARN_DEV, AWS_ROLE_ARN_QA, AWS_ROLE_ARN_STG, AWS_ROLE_ARN_PROD
+name: Deploy Bucket Antivirus
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - stg
+          - prod
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        type: string
+        default: 'qa'
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Select AWS role ARN
+        id: select-role
+        run: |
+          case "${{ github.event.inputs.environment }}" in
+            dev)
+              echo "role=${{ secrets.AWS_ROLE_ARN_DEV }}" >> $GITHUB_OUTPUT
+              ;;
+            qa)
+              echo "role=${{ secrets.AWS_ROLE_ARN_QA }}" >> $GITHUB_OUTPUT
+              ;;
+            stg)
+              echo "role=${{ secrets.AWS_ROLE_ARN_STG }}" >> $GITHUB_OUTPUT
+              ;;
+            prod)
+              echo "role=${{ secrets.AWS_ROLE_ARN_PROD }}" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "Unknown environment '${{ github.event.inputs.environment }}'" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.select-role.outputs.role }}
+          aws-region: us-east-1
+          role-session-name: ga-antivirus-${{ github.event.inputs.environment }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Fetch deployment config from SSM
+        id: ssm
+        run: |
+          ENV="${{ github.event.inputs.environment }}"
+          echo "sam_s3_bucket=$(aws ssm get-parameter --name "aav.${ENV}.SAM_S3_BUCKET" --query 'Parameter.Value' --output text)" >> $GITHUB_OUTPUT
+          echo "av_scan_bucket_names=$(aws ssm get-parameter --name "aav.${ENV}.AV_SCAN_BUCKET_NAMES" --query 'Parameter.Value' --output text)" >> $GITHUB_OUTPUT
+          ARN=$(aws ssm get-parameter --name "aav.${ENV}.AV_STATUS_SNS_ARN" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+          echo "av_status_sns_arn=$ARN" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repository if not exists
+        run: |
+          ECR_REPOSITORY="${{ github.event.inputs.environment }}/bucket-antivirus-worker"
+          aws ecr describe-repositories --repository-names ${ECR_REPOSITORY} || \
+          aws ecr create-repository --repository-name ${ECR_REPOSITORY}
+
+      - name: Build, tag, and push worker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ github.event.inputs.environment }}/bucket-antivirus-worker
+          IMAGE_TAG: ${{ github.sha }}-${{ github.event.inputs.environment }}
+        run: |
+          docker build -f Dockerfile.worker -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Build update Lambda
+        run: make archive
+
+      - name: Build enqueue Lambda zip
+        run: |
+          mkdir -p build
+          zip -j build/enqueue-lambda.zip enqueue.py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install AWS SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Build SAM application
+        run: |
+          EXTRA_PARAMS=""
+          if [ -n "${{ steps.ssm.outputs.av_status_sns_arn }}" ]; then
+            EXTRA_PARAMS=" AVStatusSNSArn=${{ steps.ssm.outputs.av_status_sns_arn }}"
+          fi
+          sam build -t template-antivirus.yaml \
+            --parameter-overrides \
+              Environment=${{ github.event.inputs.environment }} \
+              ImageTag=${{ github.sha }}-${{ github.event.inputs.environment }} \
+              ECRRepository=${{ github.event.inputs.environment }}/bucket-antivirus-worker \
+              CPU=1024 \
+              Memory=3072 \
+              ScanBucketNames="${{ steps.ssm.outputs.av_scan_bucket_names }}"${EXTRA_PARAMS}
+
+      - name: Deploy SAM application
+        run: |
+          EXTRA_PARAMS=""
+          if [ -n "${{ steps.ssm.outputs.av_status_sns_arn }}" ]; then
+            EXTRA_PARAMS=" AVStatusSNSArn=${{ steps.ssm.outputs.av_status_sns_arn }}"
+          fi
+          sam deploy \
+            --s3-bucket ${{ steps.ssm.outputs.sam_s3_bucket }} \
+            --s3-prefix bucket-antivirus-${{ github.event.inputs.environment }} \
+            --stack-name bucket-antivirus-${{ github.event.inputs.environment }} \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment=${{ github.event.inputs.environment }} \
+              ImageTag=${{ github.sha }}-${{ github.event.inputs.environment }} \
+              ECRRepository=${{ github.event.inputs.environment }}/bucket-antivirus-worker \
+              CPU=1024 \
+              Memory=3072 \
+              ScanBucketNames="${{ steps.ssm.outputs.av_scan_bucket_names }}"${EXTRA_PARAMS}
