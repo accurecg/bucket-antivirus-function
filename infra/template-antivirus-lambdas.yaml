@@ -160,7 +160,7 @@ Resources:
             Resource: !GetAtt AVScanQueue.Arn
             Condition:
               ArnEquals:
-                aws:SourceArn: !GetAtt AVScanQueueEventBridgeRule.Arn
+                aws:SourceArn: !GetAtt AVScanEventBridgeRule.Arn
       Queues:
         - !Ref AVScanQueue
 
