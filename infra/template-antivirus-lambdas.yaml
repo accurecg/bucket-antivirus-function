@@ -21,7 +21,6 @@ Parameters:
     Type: String
     Default: ""
     Description: Key filter for enqueue Lambda (e.g. ecgfile). Only keys containing this string are enqueued.
-
 Conditions:
   CreateDefinitionBucket: !Equals [!Ref AVDefinitionS3Bucket, ""]
 
@@ -131,6 +130,39 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt UpdateDefinitionSchedule.Arn
+
+  AVScanEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "av-scan-s3-object-created-${Environment}"
+      Description: S3 Object Created events for AV scan queue (keys matching */ecgfile/*)
+      EventPattern:
+        source: ["aws.s3"]
+        detail-type: ["Object Created"]
+        detail:
+          object:
+            key: [{ wildcard: "*/ecgfile/*" }]
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AVScanQueue.Arn
+          Id: AVScanQueue
+
+  AVScanQueueEventBridgePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt AVScanQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt AVScanQueueEventBridgeRule.Arn
+      Queues:
+        - !Ref AVScanQueue
 
 Outputs:
   AVScanQueueUrl:

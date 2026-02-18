@@ -25,6 +25,7 @@ import json
 import os
 import queue
 import sys
+from urllib.parse import unquote_plus
 from collections import deque
 import threading
 import time
@@ -180,6 +181,35 @@ def _def_sync_loop(s3_client, s3_resource):
         time.sleep(3600)
 
 
+def _parse_sqs_message_body(body):
+    """
+    Extract (bucket, key) from SQS message body.
+    Supports:
+    - EventBridge format: body['detail']['bucket']['name'], body['detail']['object']['key']
+    - Legacy enqueue format: body['bucket'], body['key']
+    Returns (bucket, key) or (None, None) if invalid.
+    """
+    if body.get("source") == "aws.s3" and "detail" in body:
+        detail = body["detail"]
+        bucket = (
+            detail.get("bucket", {}).get("name")
+            if isinstance(detail.get("bucket"), dict)
+            else None
+        )
+        key = (
+            detail.get("object", {}).get("key")
+            if isinstance(detail.get("object"), dict)
+            else None
+        )
+    else:
+        bucket = body.get("bucket")
+        key = body.get("key")
+    if bucket and key:
+        key = unquote_plus(key)
+        return (bucket, key)
+    return (None, None)
+
+
 def _prefetcher_loop(sqs, s3, ready_queue):
     """Receive SQS messages, download files to /tmp, put (receipt_handle, s3_object, file_path) in ready_queue."""
     while True:
@@ -200,8 +230,7 @@ def _prefetcher_loop(sqs, s3, ready_queue):
         for msg in resp.get("Messages") or []:
             try:
                 body = json.loads(msg["Body"])
-                bucket = body.get("bucket")
-                key = body.get("key")
+                bucket, key = _parse_sqs_message_body(body)
                 if not bucket or not key:
                     print(
                         "Invalid message body (missing bucket/key), deleting: %s"
