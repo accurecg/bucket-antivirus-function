@@ -325,7 +325,7 @@ Resources:
             LaunchType: FARGATE
             PlatformVersion: LATEST
             NetworkConfiguration:
-              awsvpcConfiguration:
+              AwsVpcConfiguration:
                 Subnets:
                   - !Sub "{{resolve:ssm:/aab.${Environment}.PRIVATE_SUBNET_ID_1}}"
                   - !Sub "{{resolve:ssm:/aab.${Environment}.PRIVATE_SUBNET_ID_2}}"
