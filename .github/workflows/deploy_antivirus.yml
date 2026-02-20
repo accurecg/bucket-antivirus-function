@@ -118,7 +118,7 @@ jobs:
           EXTRA_PARAMS=""
           [ -n "${{ steps.ssm.outputs.av_definition_s3_bucket }}" ] && EXTRA_PARAMS="${EXTRA_PARAMS} AVDefinitionS3Bucket=${{ steps.ssm.outputs.av_definition_s3_bucket }}"
           aws cloudformation deploy \
-            --template-file infra/template-antivirus-lambdas.yaml \
+            --template-file infra/template-antivirus-events.yaml \
             --stack-name bucket-antivirus-lambdas-${{ github.event.inputs.environment }} \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
