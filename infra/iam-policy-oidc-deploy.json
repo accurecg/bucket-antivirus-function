@@ -86,7 +86,9 @@
                 "StringEquals": {
                     "iam:PassedToService": [
                         "ecs-tasks.amazonaws.com",
-                        "lambda.amazonaws.com"
+                        "events.amazonaws.com",
+                        "lambda.amazonaws.com",
+						"scheduler.amazonaws.com"
                     ]
                 }
             }
@@ -132,7 +134,11 @@
                 "sqs:UntagQueue",
                 "sqs:ListQueueTags"
             ],
-            "Resource": "arn:aws:sqs:*:*:av-scan-queue-*"
+            "Resource": [
+                "arn:aws:sqs:*:*:av-scan-queue-*",
+                "arn:aws:sqs:*:*:av-scan-queue-dlq-*",
+                "arn:aws:sqs:*:*:av-eventbridge-dlq-*"
+            ]
         },
         {
             "Sid": "S3DefinitionsBucketScoped",
@@ -146,25 +152,6 @@
                 "s3:GetBucketTagging"
             ],
             "Resource": "arn:aws:s3:::av-definitions-*"
-        },
-        {
-            "Sid": "LambdaScoped",
-            "Effect": "Allow",
-            "Action": [
-                "lambda:CreateFunction",
-                "lambda:DeleteFunction",
-                "lambda:GetFunction",
-                "lambda:UpdateFunctionCode",
-                "lambda:UpdateFunctionConfiguration",
-                "lambda:AddPermission",
-                "lambda:RemovePermission",
-                "lambda:TagResource",
-                "lambda:UntagResource",
-                "lambda:ListTags"
-            ],
-            "Resource": [
-                "arn:aws:lambda:*:*:function:av-enqueue-*"
-            ]
         },
         {
             "Sid": "EventsScoped",

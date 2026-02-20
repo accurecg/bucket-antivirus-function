@@ -1,7 +1,4 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Transform:
-  - AWS::Serverless-2016-10-31
-  - AWS::LanguageExtensions
 
 Parameters:
   Environment:
@@ -17,20 +14,35 @@ Parameters:
     Type: String
     Default: ""
     Description: S3 bucket for ClamAV definitions. Leave empty to create one.
-  AVExpectedBucketKey:
-    Type: String
-    Default: ""
-    Description: Key filter for enqueue Lambda (e.g. ecgfile). Only keys containing this string are enqueued.
+
 Conditions:
   CreateDefinitionBucket: !Equals [!Ref AVDefinitionS3Bucket, ""]
 
 Resources:
+  AVScanQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "av-scan-queue-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      RedriveAllowPolicy: '{"redrivePermission":"allowAll"}'
+
+  AVEventBridgeDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "av-eventbridge-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+
   AVScanQueue:
     Type: AWS::SQS::Queue
+    DependsOn: AVScanQueueDLQ
     Properties:
       QueueName: !Sub "av-scan-queue-${Environment}"
       VisibilityTimeout: 900
       MessageRetentionPeriod: 1209600
+      RedrivePolicy:
+        Fn::Sub:
+          - '{"deadLetterTargetArn":"${Arn}","maxReceiveCount":5}'
+          - Arn: !GetAtt AVScanQueueDLQ.Arn
 
   AVDefinitionBucket:
     Type: AWS::S3::Bucket
@@ -42,32 +54,6 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-
-  EnqueueFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "av-enqueue-${Environment}"
-      Handler: enqueue.lambda_handler
-      CodeUri: ../build/enqueue-lambda.zip
-      Runtime: python3.11
-      MemorySize: 128
-      Timeout: 60
-      Environment:
-        Variables:
-          AV_SCAN_QUEUE_URL: !Ref AVScanQueue
-          AV_EXPECTED_BUCKET_KEY: !Ref AVExpectedBucketKey
-      Policies:
-        - Version: "2012-10-17"
-          Statement:
-            - Effect: Allow
-              Action: sqs:SendMessage
-              Resource: !GetAtt AVScanQueue.Arn
-            - Effect: Allow
-              Action:
-                - logs:CreateLogGroup
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: "*"
 
   AVScanEventBridgeRule:
     Type: AWS::Events::Rule
@@ -84,6 +70,8 @@ Resources:
       Targets:
         - Arn: !GetAtt AVScanQueue.Arn
           Id: AVScanQueue
+          DeadLetterConfig:
+            Arn: !GetAtt AVEventBridgeDLQ.Arn
 
   AVScanQueueEventBridgePolicy:
     Type: AWS::SQS::QueuePolicy
@@ -102,6 +90,23 @@ Resources:
       Queues:
         - !Ref AVScanQueue
 
+  AVEventBridgeDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt AVEventBridgeDLQ.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt AVScanEventBridgeRule.Arn
+      Queues:
+        - !Ref AVEventBridgeDLQ
+
 Outputs:
   AVScanQueueUrl:
     Description: SQS queue URL for scan jobs
@@ -113,9 +118,12 @@ Outputs:
     Value: !GetAtt AVScanQueue.Arn
     Export:
       Name: !Sub "bucket-antivirus-lambdas-${Environment}-AVScanQueueArn"
-  EnqueueFunctionArn:
-    Description: ARN of the enqueue Lambda (add S3/SNS trigger manually)
-    Value: !GetAtt EnqueueFunction.Arn
+  AVScanQueueDLQUrl:
+    Description: DLQ for failed scan messages
+    Value: !Ref AVScanQueueDLQ
+  AVEventBridgeDLQUrl:
+    Description: DLQ for EventBridge failed deliveries
+    Value: !Ref AVEventBridgeDLQ
   AVDefinitionBucketName:
     Description: S3 bucket for ClamAV definitions
     Value: !If

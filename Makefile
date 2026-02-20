@@ -58,11 +58,6 @@ coverage: clean  ## Run python tests with coverage
 	coverage run -m unittest discover -s . -p '*_test.py'
 	coverage report
 
-.PHONY: build-enqueue-lambda
-build-enqueue-lambda:  ## Build enqueue lambda zip at build/enqueue-lambda.zip (enqueue.py only)
-	mkdir -p ./build/
-	zip -j build/enqueue-lambda.zip enqueue.py
-
 .PHONY: build-worker
 build-worker:  ## Build ECS worker Docker image
 	docker build -f Dockerfile.worker -t bucket-antivirus-worker .
