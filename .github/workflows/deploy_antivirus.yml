@@ -121,9 +121,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build update Lambda
-        if: (github.event.inputs.deploy_target == 'lambdas' || github.event.inputs.deploy_target == 'all') && steps.cache-lambda.outputs.cache-hit != 'true'
-        run: make archive
 
       - name: Build enqueue Lambda zip
         if: (github.event.inputs.deploy_target == 'lambdas' || github.event.inputs.deploy_target == 'all') && steps.cache-lambda.outputs.cache-hit != 'true'
