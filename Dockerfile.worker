@@ -28,8 +28,12 @@ COPY scripts/entrypoint-worker.sh /app/entrypoint-worker.sh
 COPY scripts/healthcheck.sh /healthcheck.sh
 RUN chmod +x /app/entrypoint-worker.sh /healthcheck.sh
 
-# freshclam config for update task (uses system /usr/bin/freshclam)
-RUN mkdir -p /app/bin && printf 'DatabaseMirror database.clamav.net\nCompressLocalDatabase yes\nScriptedUpdates no\n' > /app/bin/freshclam.conf
+# Ensure root and clamav exist in /etc/passwd (required for freshclam user lookup in minimal containers).
+RUN (getent passwd root >/dev/null || echo 'root:x:0:0:root:/root:/bin/sh' >> /etc/passwd) && \
+    (getent passwd clamav >/dev/null || echo 'clamav:x:101:101:ClamAV:/var/lib/clamav:/sbin/nologin' >> /etc/passwd)
+
+# freshclam config: DatabaseOwner root = no privilege drop when already root; Foreground for one-shot.
+RUN mkdir -p /app/bin && printf 'DatabaseMirror database.clamav.net\nCompressLocalDatabase yes\nScriptedUpdates no\nDatabaseOwner root\nForeground yes\n' > /app/bin/freshclam.conf
 
 # Unbuffer Python so logs appear in ECS/CloudWatch in real time
 ENV PYTHONUNBUFFERED=1

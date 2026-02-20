@@ -16,7 +16,6 @@
 import datetime
 import hashlib
 import os
-import pwd
 import re
 import subprocess
 
@@ -129,12 +128,17 @@ def update_defs_from_freshclam(path, library_path=""):
             # Fallback for environments without `ld` (e.g. AWS Lambda):
             # just point at the bundled ClamAV libs.
             fc_env["LD_LIBRARY_PATH"] = CLAMAVLIB_PATH
+    try:
+        user_arg = __import__("pwd").getpwuid(os.getuid())[0]
+    except (KeyError, OSError):
+        user_arg = "root"  # fallback when /etc/passwd incomplete
     print("Starting freshclam with defs in %s." % path)
     fc_proc = subprocess.Popen(
         [
             FRESHCLAM_PATH,
-            "--config-file=./bin/freshclam.conf",
-            "-u %s" % pwd.getpwuid(os.getuid())[0],
+            "--config-file=/app/bin/freshclam.conf",
+            "-u",
+            user_arg,
             "--datadir=%s" % path,
         ],
         stderr=subprocess.STDOUT,
