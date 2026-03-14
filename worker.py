@@ -24,7 +24,9 @@ Post-scan I/O (S3 tagging, SNS publish, SQS delete) runs in parallel via ThreadP
 import json
 import os
 import queue
+import shutil
 import sys
+from pathlib import Path
 from urllib.parse import unquote_plus
 from collections import deque
 import threading
@@ -179,6 +181,47 @@ def _def_sync_loop(s3_client, s3_resource):
     while True:
         _sync_defs_from_s3(s3_client, s3_resource)
         time.sleep(3600)
+
+
+def _remove_uuid_folder(file_path):
+    """
+    Surgical recursive cleanup: delete the UUID-level directory to recover inodes.
+    Path structure: /tmp/{bucket_name}/{uuid}/ecgfile/{file.json}
+    Target: /tmp/{bucket_name}/{uuid}/ (stops at UUID; never deletes bucket or /tmp)
+    Uses pathlib parent-traversal for variable depth. Concurrency-safe.
+    """
+    try:
+        path = Path(file_path).resolve()
+        current = path.parent
+        tmp = Path("/tmp")
+
+        # Find UUID folder: the one whose parent is a direct child of /tmp (bucket)
+        while current != tmp and len(current.parts) > 1:
+            try:
+                if current.parent.parent == tmp:
+                    break
+            except (IndexError, AttributeError):
+                return
+            parent = current.parent
+            if parent == current or parent == tmp:
+                return
+            current = parent
+
+        uuid_folder = current
+        if uuid_folder == tmp:
+            return
+        try:
+            uuid_folder.relative_to(tmp)
+        except ValueError:
+            return
+
+        if not uuid_folder.is_dir():
+            return
+
+        shutil.rmtree(uuid_folder)
+        print("Removed UUID folder: %s" % uuid_folder, flush=True)
+    except OSError:
+        pass
 
 
 def _parse_sqs_message_body(body):
@@ -363,6 +406,7 @@ def run():
                 os.remove(file_path)
             except OSError:
                 pass
+            _remove_uuid_folder(file_path)
             files_processed += 1
             last_file_time = time.time() - iter_start
             avg_duration = (
