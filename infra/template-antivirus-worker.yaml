@@ -47,9 +47,6 @@ Parameters:
   AVScanPassThroughEnabled:
     Type: String
     Default: "False"
-    AllowedValues:
-      - "True"
-      - "False"
     Description: When True, worker skips download/scan and marks objects CLEAN. Sourced from SSM aav.{Environment}.AV_SCAN_PASS_THROUGH_ENABLED at deploy.
 
 Conditions:
