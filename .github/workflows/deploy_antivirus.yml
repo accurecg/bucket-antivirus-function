@@ -83,6 +83,8 @@ jobs:
           echo "av_status_sns_arn=$ARN" >> $GITHUB_OUTPUT
           BUCKET=$(aws ssm get-parameter --name "aav.${ENV}.AV_DEFINITION_S3_BUCKET" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
           echo "av_definition_s3_bucket=$BUCKET" >> $GITHUB_OUTPUT
+          PASS_THROUGH=$(aws ssm get-parameter --name "aav.${ENV}.AV_SCAN_PASS_THROUGH_ENABLED" --query 'Parameter.Value' --output text 2>/dev/null || echo "False")
+          echo "av_scan_pass_through_enabled=$PASS_THROUGH" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         if: github.event.inputs.deploy_target == 'worker' || github.event.inputs.deploy_target == 'all'
@@ -145,6 +147,7 @@ jobs:
           SCAN_BUCKET_LIST_ARNS=$(echo "$BUCKETS" | sed 's/\([^,]*\)/arn:aws:s3:::\1/g')
           EXTRA_PARAMS=""
           [ -n "${{ steps.ssm.outputs.av_status_sns_arn }}" ] && EXTRA_PARAMS="${EXTRA_PARAMS} AVStatusSNSArn=${{ steps.ssm.outputs.av_status_sns_arn }}"
+          EXTRA_PARAMS="${EXTRA_PARAMS} AVScanPassThroughEnabled=${{ steps.ssm.outputs.av_scan_pass_through_enabled }}"
           aws cloudformation deploy \
             --template-file infra/template-antivirus-worker.yaml \
             --stack-name bucket-antivirus-worker-${{ github.event.inputs.environment }} \

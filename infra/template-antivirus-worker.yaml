@@ -44,6 +44,13 @@ Parameters:
   AVDefinitionBucketName:
     Type: String
     Description: S3 bucket name for ClamAV definitions (from lambdas stack output)
+  AVScanPassThroughEnabled:
+    Type: String
+    Default: "False"
+    AllowedValues:
+      - "True"
+      - "False"
+    Description: When True, worker skips download/scan and marks objects CLEAN. Sourced from SSM aav.{Environment}.AV_SCAN_PASS_THROUGH_ENABLED at deploy.
 
 Conditions:
   HasAVStatusSNS: !Not [!Equals [!Ref AVStatusSNSArn, ""]]
@@ -208,6 +215,8 @@ Resources:
               Value: "scanStatus"
             - Name: AV_TIMESTAMP_METADATA
               Value: "scanTimestamp"
+            - Name: AV_SCAN_PASS_THROUGH_ENABLED
+              Value: !Ref AVScanPassThroughEnabled
             - Name: ENV
               Value: !Ref Environment
           HealthCheck:

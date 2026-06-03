@@ -43,7 +43,10 @@ from scan import str_to_bool
 from common import AV_DEFINITION_S3_BUCKET
 from common import AV_DEFINITION_S3_PREFIX
 from common import AV_DELETE_INFECTED_FILES
+from common import AV_SCAN_PASS_THROUGH_ENABLED
 from common import AV_SCAN_QUEUE_URL
+from common import AV_SIGNATURE_OK
+from common import AV_STATUS_CLEAN
 from common import AV_STATUS_SNS_ARN
 from common import AV_STATUS_INFECTED
 from common import create_dir
@@ -52,6 +55,10 @@ from common import get_timestamp
 # Connection pool sized for parallel post-scan I/O
 BOTO_CONFIG = Config(max_pool_connections=20)
 POST_PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=5)
+
+
+def is_pass_through_enabled():
+    return str_to_bool(AV_SCAN_PASS_THROUGH_ENABLED)
 
 
 def _run_s3_tagging(s3_client, s3_object, scan_result, scan_signature, timestamp):
@@ -253,7 +260,7 @@ def _parse_sqs_message_body(body):
     return (None, None)
 
 
-def _prefetcher_loop(sqs, s3, ready_queue):
+def _prefetcher_loop(sqs, s3, ready_queue, pass_through=False):
     """Receive SQS messages, download files to /tmp, put (receipt_handle, s3_object, file_path) in ready_queue."""
     while True:
         try:
@@ -286,6 +293,9 @@ def _prefetcher_loop(sqs, s3, ready_queue):
                     )
                     continue
                 s3_object = s3.Object(bucket, key)
+                if pass_through:
+                    ready_queue.put((msg["ReceiptHandle"], s3_object, None))
+                    continue
                 file_path = scan.get_local_path(s3_object, "/tmp")
                 create_dir(os.path.dirname(file_path))
                 s3_object.download_file(file_path)
@@ -310,6 +320,13 @@ def run():
     s3_client = boto3.client("s3", config=BOTO_CONFIG)
     sns_client = boto3.client("sns", config=BOTO_CONFIG)
 
+    pass_through = is_pass_through_enabled()
+    if pass_through:
+        print(
+            "PASS_THROUGH mode enabled; All objects will be tagged CLEAN",
+            flush=True,
+        )
+
     # Background thread: sync virus defs from S3 every 60 min. SelfCheck in clamd auto-reloads.
     if AV_DEFINITION_S3_BUCKET:
         sync_thread = threading.Thread(
@@ -328,7 +345,7 @@ def run():
     ready_queue = queue.Queue(maxsize=2)
     prefetcher_thread = threading.Thread(
         target=_prefetcher_loop,
-        args=(sqs, s3, ready_queue),
+        args=(sqs, s3, ready_queue, pass_through),
         daemon=True,
     )
     prefetcher_thread.start()
@@ -363,14 +380,22 @@ def run():
             continue
         iter_start = time.time()
         try:
-            scan_result, scan_signature = scan.scan_one_object_from_path(
-                s3_object,
-                file_path,
-                s3_resource=s3,
-                s3_client=s3_client,
-                sns_client=sns_client,
-                skip_post_processing=True,
-            )
+            if pass_through:
+                scan_result, scan_signature = AV_STATUS_CLEAN, AV_SIGNATURE_OK
+                print(
+                    "PASS_THROUGH: skipped download and scan for s3://%s/%s; marking as CLEAN"
+                    % (s3_object.bucket_name, s3_object.key),
+                    flush=True,
+                )
+            else:
+                scan_result, scan_signature = scan.scan_one_object_from_path(
+                    s3_object,
+                    file_path,
+                    s3_resource=s3,
+                    s3_client=s3_client,
+                    sns_client=sns_client,
+                    skip_post_processing=True,
+                )
             metrics.send(
                 env=os.getenv("ENV", ""),
                 bucket=s3_object.bucket_name,
@@ -402,11 +427,12 @@ def run():
                 flush=True,
             )
         finally:
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
-            _remove_uuid_folder(file_path)
+            if file_path:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+                _remove_uuid_folder(file_path)
             files_processed += 1
             last_file_time = time.time() - iter_start
             avg_duration = (
