@@ -190,43 +190,32 @@ def _def_sync_loop(s3_client, s3_resource):
         time.sleep(3600)
 
 
-def _remove_uuid_folder(file_path):
+def _work_dir_for_message(message_id):
+    """Return /tmp/av-scan-{MessageId} for an SQS message."""
+    return os.path.join("/tmp", "av-scan-%s" % message_id)
+
+
+def _remove_work_dir(work_dir):
     """
-    Surgical recursive cleanup: delete the UUID-level directory to recover inodes.
-    Path structure: /tmp/{bucket_name}/{uuid}/ecgfile/{file.json}
-    Target: /tmp/{bucket_name}/{uuid}/ (stops at UUID; never deletes bucket or /tmp)
-    Uses pathlib parent-traversal for variable depth. Concurrency-safe.
+    Remove a per-message download root created for one SQS message.
+    Path shape: /tmp/av-scan-{MessageId}/...
+    Only deletes dirs under /tmp whose basename starts with av-scan-.
     """
+    if not work_dir:
+        return
     try:
-        path = Path(file_path).resolve()
-        current = path.parent
-        tmp = Path("/tmp")
-
-        # Find UUID folder: the one whose parent is a direct child of /tmp (bucket)
-        while current != tmp and len(current.parts) > 1:
-            try:
-                if current.parent.parent == tmp:
-                    break
-            except (IndexError, AttributeError):
-                return
-            parent = current.parent
-            if parent == current or parent == tmp:
-                return
-            current = parent
-
-        uuid_folder = current
-        if uuid_folder == tmp:
-            return
+        path = Path(work_dir).resolve()
+        tmp = Path("/tmp").resolve()
         try:
-            uuid_folder.relative_to(tmp)
+            path.relative_to(tmp)
         except ValueError:
             return
-
-        if not uuid_folder.is_dir():
+        if path == tmp or not path.name.startswith("av-scan-"):
             return
-
-        shutil.rmtree(uuid_folder)
-        print("Removed UUID folder: %s" % uuid_folder, flush=True)
+        if not path.is_dir():
+            return
+        shutil.rmtree(path, ignore_errors=True)
+        print("Removed work dir: %s" % path, flush=True)
     except OSError:
         pass
 
@@ -261,7 +250,10 @@ def _parse_sqs_message_body(body):
 
 
 def _prefetcher_loop(sqs, s3, ready_queue, pass_through=False):
-    """Receive SQS messages, download files to /tmp, put (receipt_handle, s3_object, file_path) in ready_queue."""
+    """
+    Receive SQS messages, download each into /tmp/av-scan-{MessageId}/...,
+    put (receipt_handle, s3_object, file_path, work_dir) in ready_queue.
+    """
     while True:
         try:
             resp = sqs.receive_message(
@@ -278,6 +270,7 @@ def _prefetcher_loop(sqs, s3, ready_queue, pass_through=False):
             )
             continue
         for msg in resp.get("Messages") or []:
+            work_dir = None
             try:
                 body = json.loads(msg["Body"])
                 bucket, key = _parse_sqs_message_body(body)
@@ -294,13 +287,21 @@ def _prefetcher_loop(sqs, s3, ready_queue, pass_through=False):
                     continue
                 s3_object = s3.Object(bucket, key)
                 if pass_through:
-                    ready_queue.put((msg["ReceiptHandle"], s3_object, None))
+                    ready_queue.put((msg["ReceiptHandle"], s3_object, None, None))
                     continue
-                file_path = scan.get_local_path(s3_object, "/tmp")
+                work_dir = _work_dir_for_message(msg["MessageId"])
+                # Retry of same MessageId may leave a stale tree; start clean.
+                if os.path.isdir(work_dir):
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                os.mkdir(work_dir)
+                file_path = scan.get_local_path(s3_object, work_dir)
                 create_dir(os.path.dirname(file_path))
                 s3_object.download_file(file_path)
-                ready_queue.put((msg["ReceiptHandle"], s3_object, file_path))
+                ready_queue.put(
+                    (msg["ReceiptHandle"], s3_object, file_path, work_dir)
+                )
             except Exception as e:
+                _remove_work_dir(work_dir)
                 print(
                     "Prefetcher error (message will retry after visibility timeout): %s"
                     % e,
@@ -341,7 +342,8 @@ def run():
             "AV_DEFINITION_S3_BUCKET not set; skipping background def sync", flush=True
         )
 
-    # Prefetch queue: (receipt_handle, s3_object, file_path). Max 2 items to limit /tmp usage.
+    # Prefetch queue: (receipt_handle, s3_object, file_path, work_dir).
+    # Max 2 items to limit /tmp usage. work_dir is /tmp/av-scan-{MessageId}.
     ready_queue = queue.Queue(maxsize=2)
     prefetcher_thread = threading.Thread(
         target=_prefetcher_loop,
@@ -364,8 +366,9 @@ def run():
     IDLE_RESET_SECONDS = 300
     files_processed = 0
     while True:
+        work_dir = None
         try:
-            receipt_handle, s3_object, file_path = ready_queue.get(
+            receipt_handle, s3_object, file_path, work_dir = ready_queue.get(
                 timeout=IDLE_RESET_SECONDS
             )
         except queue.Empty:
@@ -427,12 +430,7 @@ def run():
                 flush=True,
             )
         finally:
-            if file_path:
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass
-                _remove_uuid_folder(file_path)
+            _remove_work_dir(work_dir)
             files_processed += 1
             last_file_time = time.time() - iter_start
             avg_duration = (
