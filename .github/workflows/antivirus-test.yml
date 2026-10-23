@@ -20,6 +20,17 @@ jobs:
         run: |
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Check certifi trust store
+        run: |
+          python -c '
+          import certifi
+          bundle = open(certifi.where(), encoding="utf-8").read()
+          blocked = ("emSign ECC Root CA - G3", "AAA Certificate Services")
+          found = [name for name in blocked if name in bundle]
+          if found:
+              raise SystemExit("certifi bundle still trusts: " + ", ".join(found))
+          '
+
       - name: Run tests
         run: make test
 
