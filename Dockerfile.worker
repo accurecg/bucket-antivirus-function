@@ -7,8 +7,11 @@ FROM clamav/clamav:stable
 
 USER root
 
-# Install Python and netcat (for clamd TCP PING healthcheck)
-RUN apk add --no-cache python3 py3-pip netcat-openbsd
+# Install Python and netcat (for clamd TCP PING healthcheck).
+# Upgrade ca-certificates before the tini download and pip so TLS uses Alpine's
+# patched store (20261020-r0 or later) for CVE-2026-113470.
+RUN apk add --no-cache python3 py3-pip netcat-openbsd ca-certificates && \
+    apk upgrade --no-cache ca-certificates
 
 # tini as PID 1 (reaps zombies, forwards SIGTERM). Use static binary so we don't depend on base image repos.
 # For ARM64 Fargate tasks, switch to tini-static-arm64 or install tini via apk in a separate RUN.

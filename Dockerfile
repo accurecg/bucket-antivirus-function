@@ -15,6 +15,26 @@ RUN amazon-linux-extras install epel -y && \
     yum install -y cpio yum-utils tar.x86_64 gzip zip python3-pip && \
     yum clean all && rm -rf /var/cache/yum
 
+# CVE-2026-113470: AL2 ca-certificates is still pending. Pick up the RPM when
+# Amazon publishes it, and until then distrust the two roots that anchor the
+# compromised eMudhra intermediates. Skip an extract once that root is gone.
+RUN yum update -y ca-certificates && \
+    yum clean all && rm -rf /var/cache/yum && \
+    d=/etc/pki/ca-trust/source/blocklist; \
+    [ -d "$d" ] || d=/etc/pki/ca-trust/source/blacklist; \
+    mkdir -p "$d" && \
+    if trust list | grep -q 'Comodo AAA Services root'; then \
+      trust extract --overwrite --format=pem-bundle \
+        --filter='pkcs11:object=Comodo%20AAA%20Services%20root;type=cert' \
+        "$d/Comodo_AAA_Services_root.pem"; \
+    fi && \
+    if trust list | grep -q 'emSign ECC Root CA - G3'; then \
+      trust extract --overwrite --format=pem-bundle \
+        --filter='pkcs11:object=emSign%20ECC%20Root%20CA%20-%20G3;type=cert' \
+        "$d/emSign_ECC_Root_CA_-_G3.pem"; \
+    fi && \
+    update-ca-trust
+
 # This had --no-cache-dir, tracing through multiple tickets led to a problem in wheel
 RUN pip3 install -r requirements.txt && \
     rm -rf /root/.cache/pip
